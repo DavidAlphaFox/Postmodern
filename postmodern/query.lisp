@@ -17,12 +17,26 @@
                          :for symbol :in symbols
                          :collect symbol :collect (next-field field)))))
 
+;; Converts field names to hash table keys and returns an array of rows
+(def-row-reader array-hash-row-reader (fields)
+  (loop :while (next-row)
+     :collect (loop :for field :across fields
+                 with hash = (make-hash-table :test 'equal)
+                 do  (setf (gethash  (field-name field) hash)
+                           (next-field field))
+                 finally (return hash)) into result
+     :finally (return (make-array (length result)
+                                  :initial-contents result))))
+
 ;; A row-reader for reading only a single column, and returning a list
 ;; of single values.
 (def-row-reader column-row-reader (fields)
   (assert (= (length fields) 1))
   (loop :while (next-row)
         :collect (next-field (elt fields 0))))
+
+#+postmodern-thread-safe
+(defvar *class-finalize-lock* (bt:make-lock))
 
 (defparameter *result-styles*
   '((:none ignore-row-reader all-rows)
@@ -36,6 +50,7 @@
     (:str-alist alist-row-reader single-row)
     (:plists symbol-plist-row-reader all-rows)
     (:plist symbol-plist-row-reader single-row)
+    (:array-hash array-hash-row-reader all-rows)
     (:column column-row-reader all-rows)
     (:single column-row-reader single-row)
     (:single! column-row-reader single-row!))
@@ -52,17 +67,22 @@ returned.")
   (let ((format-spec (cdr (assoc format *result-styles*))))
     (if format-spec
 	`(',(car format-spec) ,@(cdr format-spec))
-	(destructuring-bind (class &optional result)
+	(destructuring-bind (class-name &optional result)
 	    (dao-spec-for-format format)
-	  (unless class
+	  (unless class-name
 	    (error "~S is not a valid result style." format))
-	  (let ((class-name (gensym)))
-	    (list `(let ((,class-name (find-class ',class)))
-		     (unless (class-finalized-p ,class-name)
-		       (finalize-inheritance ,class-name))
-		     (dao-row-reader ,class-name))
+	  (let ((class (gensym)))
+	    (list `(let ((,class (find-class ',class-name)))
+		     (unless (class-finalized-p ,class)
+		       #+postmodern-thread-safe
+		       (bordeaux-threads:with-lock-held (*class-finalize-lock*)
+			 (unless (class-finalized-p ,class)
+			   (finalize-inheritance ,class)))
+		       #-postmodern-thread-safe
+		       (finalize-inheritance ,class))
+		     (dao-row-reader ,class))
 		  (if (eq result :single)
-		      'single-row 
+		      'single-row
 		      'all-rows)))))))
 
 (defmacro all-rows (form)
@@ -92,21 +112,22 @@ $X elements. If one of the arguments is a known result style or a class name,
 it specifies the format in which the results should be returned."
   (let* ((format :rows)
          (args (loop :for arg :in args/format
-		     :if (or (dao-spec-for-format arg)
-			     (assoc arg *result-styles*)) :do (setf format arg)
-                     :else :collect arg)))
+		              :if (or (dao-spec-for-format arg)
+			                    (assoc arg *result-styles*)) :do (setf format arg)
+                  :else :collect arg)))
     (destructuring-bind (reader result-form) (reader-for-format format)
       (let ((base (if args
-                      `(progn
-                        (prepare-query *database* "" ,(real-query query))
-                        (exec-prepared *database* "" (list ,@args) ,reader))
-                      `(exec-query *database* ,(real-query query) ,reader))))
+		                  (let ((vars (loop :for x :in args :collect (gensym))))
+			                  `(let ,(loop :for v :in vars :for a :in args :collect `(,v ,a))
+			                     (prepare-query *database* "" ,(real-query query))
+			                     (exec-prepared *database* "" (list ,@vars) ,reader)))
+		                  `(exec-query *database* ,(real-query query) ,reader))))
         `(,result-form ,base)))))
 
 (defmacro execute (query &rest args)
   "Execute a query, ignore the results."
   `(let ((rows (nth-value 1 (query ,query ,@args :none))))
-    (if rows (values rows rows) 0)))
+     (if rows (values rows rows) 0)))
 
 (defmacro doquery (query (&rest names) &body body)
  "Iterate over the rows in the result of a query, binding the given

@@ -21,7 +21,6 @@
   (is (= 30 (simple-date::days-in-month 8 2000)))
   (is (= 31 (simple-date::days-in-month 9 2000)))
   (is (= 31 (simple-date::days-in-month 10 2000)))
-  (is (= 29 (simple-date::days-in-month 11 2000)))
   (is (= 28 (simple-date::days-in-month 11 2001))))
 
 (defmacro with-random-dates (amount &body body)
@@ -64,7 +63,7 @@
                (= min* min)
                (= sec* sec)
                (= millisec* millisec))))))
-  
+
 (test timestamp-universal-times
   (with-random-dates 100
     (declare (ignore millisec))

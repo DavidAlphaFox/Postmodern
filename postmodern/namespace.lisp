@@ -25,7 +25,7 @@
   (let ((old-search-path (get-search-path)))
     (unwind-protect
          (progn
-           (unless (schema-exist-p schema)
+           (unless (schema-exists-p schema)
              (if (eq if-not-exist :create)
                  (create-schema schema)
                  (error 'database-error :message (format nil "Schema '~a' does not exist." schema))))
@@ -35,9 +35,13 @@
       (when drop-after (drop-schema schema :cascade 't)))))
 
 (defun get-search-path ()
+  "Returns the default schema search path for the current session."
   (query "SHOW search_path" :single))
 
 (defun set-search-path (path)
+  "This changes the postgresql runtime parameter controlling what order
+schemas are searched. You can always use fully qualified names [schema.table].
+By default, this function only changes the search path for the current session."
   (execute (format nil "SET search_path TO ~a" path)))
 
 (defun list-schemata ()
@@ -47,13 +51,24 @@
   SELECT schema_name FROM information_schema.schemata where schema_name !~ '(pg_*)|information_schema' ORDER BY schema_name ;"
   (query (:select 'schema_name
           :from 'information_schema.schemata
-          :where (:!~ 'schema_name "pg_.*|information_schema")) :column))
+          :where (:!~ 'schema_name "pg_.*|information_schema"))
+         :column))
 
-(defun schema-exist-p (name)
-  "Predicate for schema existence"
+(defun list-schemas ()
+  "List schemas in the current database, excluding the pg_* system schemas."
+  (loop for x in (query (:select 'nspname
+                                 :from 'pg_namespace
+                                 :where (:!~* 'nspname "^pg_.*")))
+       collect (first x)))
+
+
+(defun schema-exists-p (name)
+  "Predicate for schema existence. More consistent with naming scheme for other functions."
   (query (:select (:exists (:select 'schema_name
                             :from 'information_schema.schemata
-                            :where (:= 'schema_name (to-sql-name name))))) :single))
+                            :where (:= 'schema_name '$1))))
+         (to-sql-name name)
+         :single))
 
 (defun create-schema (schema)
   "Creating a non existing schema.

@@ -3,10 +3,10 @@
 "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
 <head>
-<!-- 2018-08-23 Thu 14:56 -->
+<!-- 2018-08-23 Thu 18:13 -->
 <meta http-equiv="Content-Type" content="text/html;charset=utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Simple-Date</title>
+<title>Dynamic Query Notes</title>
 <meta name="generator" content="Org mode" />
 <style type="text/css">
  <!--/*--><![CDATA[/*><!--*/
@@ -229,368 +229,179 @@ for the JavaScript code in this tag.
 </head>
 <body>
 <div id="content">
-<h1 class="title">Simple-Date</h1>
+<h1 class="title">Dynamic Query Notes</h1>
 <div id="table-of-contents">
 <h2>Table of Contents</h2>
 <div id="text-table-of-contents">
 <ul>
-<li><a href="#org18cc74d">Date type</a>
-<ul>
-<li><a href="#org5d56d2e">class date</a></li>
-<li><a href="#org0bb2487">function encode-date (year month day)</a></li>
-<li><a href="#org46e3166">function decode-date (date)</a></li>
-<li><a href="#org38a264c">function day-of-week (date)</a></li>
-<li><a href="#org1638436">Timestamp type</a></li>
-<li><a href="#org376fcb0">function encode-timestamp (year month day &amp;optional (hour 0) (minute 0) (second 0) (millisecond 0))</a></li>
-<li><a href="#org0bfc19b">function decode-timestamp (timestamp)</a></li>
-<li><a href="#org8df4397">function timestamp-to-universal-time (timestamp)</a></li>
-<li><a href="#orga468de8">function universal-time-to-timestamp (universal-time)</a></li>
-<li><a href="#org6208491">Interval type</a></li>
-<li><a href="#org09ff194">function encode-interval (&amp;key (year 0) (month 0) (week 0) (day 0) (hour 0) (minute 0) (second 0) (millisecond 0))</a></li>
-<li><a href="#orgda6a853">function decode-interval (interval)</a></li>
-</ul>
-</li>
-<li><a href="#org44bda7e">Operations</a>
-<ul>
-<li><a href="#org965462c">method time-add (a b)</a></li>
-<li><a href="#org79df090">method time-subtract (a b)</a></li>
-<li><a href="#orgc6191a0">method time= (a b)</a></li>
-<li><a href="#org99daad6">method time&lt; (a b)</a></li>
-<li><a href="#org5ea76ae">method time&gt; (a b)</a></li>
-<li><a href="#org96af6b8">function time&lt;= (a b)</a></li>
-<li><a href="#org1af8d7c">function time&gt;= (a b)</a></li>
-</ul>
-</li>
+<li><a href="#orgd9c9ee7">Overview</a></li>
+<li><a href="#org54884fc">Approach #1 Use sql-compile</a></li>
+<li><a href="#org785a113">Approach #2 Use :raw</a></li>
 </ul>
 </div>
 </div>
+<div id="outline-container-orgd9c9ee7" class="outline-2">
+<h2 id="orgd9c9ee7">Overview</h2>
+<div class="outline-text-2" id="text-orgd9c9ee7">
 <p>
-Simple-date provides types (CLOS classes) for dates, timestamps, and intervals
-similar to the ones SQL databases use, in order to be able to store and read
-these to and from a database in a straighforward way. A few obvious operations
-are defined on these types.
+The question often gets asked how to build dynamic or composable queries
+in postmodern. First we need to remember that the query macro assumes that
+everything that is not a list starting with a keyword will evaluate to a
+string.
 </p>
 
 <p>
-The most glaring defect of this library is its ignorance of time zones. It
-pretends the whole world lives in UTC. Use with care.
+There are generally two approaches to building dynamic or composible queries,
+either use sql-compile or use :raw. In either case you will need to ensure
+that either you have control over the inputs or they still result in
+parameterized queries. If not you have opened yourself up to an sql injection
+attack.
 </p>
+</div>
+</div>
 
+<div id="outline-container-org54884fc" class="outline-2">
+<h2 id="org54884fc">Approach #1 Use sql-compile</h2>
+<div class="outline-text-2" id="text-org54884fc">
 <p>
-To use this library with cl-postgres or postmodern,
-load simple-date-cl-postgres-glue to register suitable SQL
-readers and writers for the associated database types.
-</p>
-
-<p>
-To get back to the default cl-postgres reader:
+Sql-compile does a run-time compilation of an s-sql expression. In the
+following example, we create a function that accepts a where-clause,
+a table-name, 3 columns to select and two parameters to go into the where
+clause.
 </p>
 <div class="org-src-container">
-<pre class="src src-lisp">(setf cl-postgres:*sql-readtable*
-        (cl-postgres:copy-sql-readtable
-         cl-postgres::*default-sql-readtable*))
+<pre class="src src-lisp">(defun toy-example (where-clause table-name col1 col2 col3 arg1 arg2)
+  (with-test-connection
+   (query (sql-compile
+           (append `(:select ,col1 ,col2 ,col3 :from ,table-name :where)
+                   where-clause))
+          arg1 arg2)))
+
+(toy-example '((:and (:= 'city '$1) (:&gt; 'salary '$2))) 'employee 'id 'name 'city "Toronto" 45000)
+
+((6 "James" "Toronto") (9 "Mary" "Toronto"))
+
+</pre>
+</div>
+<p>
+If we just look at what this call to sql-compile in toy-example generates, it would look like:
+</p>
+<div class="org-src-container">
+<pre class="src src-lisp">"(SELECT id, name, city FROM employee WHERE ((city = $1) and (salary &gt; $2)))"
+</pre>
+</div>
+<p>
+This example is still a parameterized query but for security reasons you will
+need to be very careful how you generate the where clause.
+</p>
+
+<p>
+Another example with sql-compile and append, in this case updating a table and
+setting two columns to NULL.
+</p>
+<div class="org-src-container">
+<pre class="src src-lisp">(sql-compile (append '(:update :table1 :set)
+                     (loop for a in '("col1" "col2")
+                           collect a
+                           collect :NULL)))
+
+"UPDATE table1 SET E'col1' = NULL, E'col2' = NULL"
 </pre>
 </div>
 
 <p>
-To use the simple-date reader when cl-postgres is using the default:
+Lets think about it differently. What if we know the universe of columns we
+want to select, but want to conditionally select some of them. Suppose we
+know our targetted table has columns:
 </p>
+
+<p>
+'id 'name 'salary 'start-date 'city 'region 'age.
+</p>
+
+<p>
+We may decide we always want name, city and age, but salary and start-date are
+conditional.
+</p>
+
 <div class="org-src-container">
-<pre class="src src-lisp">(setf cl-postgres:*sql-readtable*
-        (cl-postgres:copy-sql-readtable
-         simple-date-cl-postgres-glue:*simple-date-sql-readtable*))
+<pre class="src src-lisp">(defun toy-example-2 (salaryp start-date-p)
+  (sql-compile
+   (remove nil `(:select 'name 'city 'age
+                         ,(if salaryp 'salary nil)
+                         ,(if start-date-p 'start-date nil)
+                         :from 'employee))))
+
+(query (toy-example-2 t t))
+
+(("Jason" "New York" 29 40420 #&lt;SIMPLE-DATE:DATE 01-02-1994&gt;)
+ ("Robert" "Vancouver" 21 14420 #&lt;SIMPLE-DATE:DATE 02-01-1995&gt;)
+ ("Celia" "Toronto" 24 24020 #&lt;SIMPLE-DATE:DATE 03-12-1996&gt;)
+ ("Linda" "New York" 28 40620 #&lt;SIMPLE-DATE:DATE 04-11-1997&gt;)
+ ("David" "Vancouver" 31 80026 #&lt;SIMPLE-DATE:DATE 05-10-1998&gt;)
+ ("James" "Toronto" 26 70060 #&lt;SIMPLE-DATE:DATE 06-09-1999&gt;)
+ ("Alison" "New York" 38 90620 #&lt;SIMPLE-DATE:DATE 07-08-2000&gt;)
+ ("Chris" "Vancouver" 22 26020 #&lt;SIMPLE-DATE:DATE 08-07-2001&gt;)
+ ("Mary" "Toronto" 34 60020 #&lt;SIMPLE-DATE:DATE 08-06-2002&gt;))
+
+(query (toy-example-2 t nil))
+
+(("Jason" "New York" 29 40420) ("Robert" "Vancouver" 21 14420)
+ ("Celia" "Toronto" 24 24020) ("Linda" "New York" 28 40620)
+ ("David" "Vancouver" 31 80026) ("James" "Toronto" 26 70060)
+ ("Alison" "New York" 38 90620) ("Chris" "Vancouver" 22 26020)
+ ("Mary" "Toronto" 34 60020))
+
 </pre>
 </div>
-
 <p>
-As a reminder for those who want to use local-time, to enable the local-time
-reader:
+You could skip the (remove nil&#x2026; portion and substitute t for nil. E.g.
 </p>
 <div class="org-src-container">
-<pre class="src src-lisp">(local-time:set-local-time-cl-postgres-readers)
+<pre class="src src-lisp">(defun toy-example-2 (salaryp start-date-p)
+  (sql-compile
+   `(:select 'name 'city 'age
+             ,(if salaryp 'salary t)
+             ,(if start-date-p 'start-date t)
+             :from 'employee)))
 </pre>
 </div>
-
-
-<div id="outline-container-org18cc74d" class="outline-2">
-<h2 id="org18cc74d">Date type</h2>
-<div class="outline-text-2" id="text-org18cc74d">
-</div>
-<div id="outline-container-org5d56d2e" class="outline-3">
-<h3 id="org5d56d2e">class date</h3>
-<div class="outline-text-3" id="text-org5d56d2e">
 <p>
-Represents a date, with no time-of-day information.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org0bb2487" class="outline-3">
-<h3 id="org0bb2487">function encode-date (year month day)</h3>
-<div class="outline-text-3" id="text-org0bb2487">
-<p>
-→ date
+But I prefer to remove those segments completely from the query.
 </p>
 
 <p>
-Creates a date object.
+Following on this same thread of thought, you can define a portion of the
+sql in a let clause:
 </p>
-</div>
-</div>
+<div class="org-src-container">
+<pre class="src src-lisp">(let ((sql1 '(:= name "Jason")))
+  (query (sql-compile
+    `(:select 'name 'city 'age :from 'employee :where ,sql1))))
 
-<div id="outline-container-org46e3166" class="outline-3">
-<h3 id="org46e3166">function decode-date (date)</h3>
-<div class="outline-text-3" id="text-org46e3166">
-<p>
-→ (values year month day)
-</p>
-
-<p>
-Extract the elements from a date object.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org38a264c" class="outline-3">
-<h3 id="org38a264c">function day-of-week (date)</h3>
-<div class="outline-text-3" id="text-org38a264c">
-<p>
-→ integer
-</p>
-
-<p>
-Determine the day of the week that the given date falls on. Value ranges from
-0 to 6, with 0 being Sunday and 6 being Saturday.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org1638436" class="outline-3">
-<h3 id="org1638436">Timestamp type</h3>
-<div class="outline-text-3" id="text-org1638436">
-<p>
-class timestamp
-</p>
-
-<p>
-Represents an absolute timestamp, with a millisecond precision.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org376fcb0" class="outline-3">
-<h3 id="org376fcb0">function encode-timestamp (year month day &amp;optional (hour 0) (minute 0) (second 0) (millisecond 0))</h3>
-<div class="outline-text-3" id="text-org376fcb0">
-<p>
-→ timestamp
-</p>
-
-<p>
-Create a timestamp. No negative values or values outside of an arguments normal
-range (i.e. 60 for minutes, 1000 for milliseconds) should be passed.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org0bfc19b" class="outline-3">
-<h3 id="org0bfc19b">function decode-timestamp (timestamp)</h3>
-<div class="outline-text-3" id="text-org0bfc19b">
-<p>
-→ (values year month day hour minute second millisecond)
-</p>
-
-<p>
-Decode a timestamp into its components.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org8df4397" class="outline-3">
-<h3 id="org8df4397">function timestamp-to-universal-time (timestamp)</h3>
-<div class="outline-text-3" id="text-org8df4397">
-<p>
-→ universal-time
-</p>
-
-<p>
-Convert a timestamp to the corresponding universal-time, rounding to seconds.
-Note that this will treat the timestamp as if it were in UTC.
-</p>
-</div>
-</div>
-
-<div id="outline-container-orga468de8" class="outline-3">
-<h3 id="orga468de8">function universal-time-to-timestamp (universal-time)</h3>
-<div class="outline-text-3" id="text-orga468de8">
-<p>
-→ timestamp
-</p>
-
-<p>
-Create a timestamp from a universal time. Again, the resulting timestamp should
-be treated as if it were in UTC.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org6208491" class="outline-3">
-<h3 id="org6208491">Interval type</h3>
-<div class="outline-text-3" id="text-org6208491">
-<p>
-class interval
-</p>
-
-<p>
-An interval represents a period of time. It contains both an absolute part in
-milliseconds (days, weeks, minutes, etc are always the same length), and a
-relative part for months and years ― the amount of time that a month or year
-represents is not always the same.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org09ff194" class="outline-3">
-<h3 id="org09ff194">function encode-interval (&amp;key (year 0) (month 0) (week 0) (day 0) (hour 0) (minute 0) (second 0) (millisecond 0))</h3>
-<div class="outline-text-3" id="text-org09ff194">
-<p>
-→ interval
-</p>
-
-<p>
-Create an interval. Arguments may be negative and of any size.
-</p>
-</div>
-</div>
-
-<div id="outline-container-orgda6a853" class="outline-3">
-<h3 id="orgda6a853">function decode-interval (interval)</h3>
-<div class="outline-text-3" id="text-orgda6a853">
-<p>
-→ (values year month day hour minute second millisecond)
-</p>
-
-<p>
-Decompose an interval into parts. Note that these may be different from the
-parameters that created it ― an interval of 3600 seconds is the same as one
-of 1 hour.
-</p>
+(("Jason" "New York" 29))
+</pre>
 </div>
 </div>
 </div>
 
-<div id="outline-container-org44bda7e" class="outline-2">
-<h2 id="org44bda7e">Operations</h2>
-<div class="outline-text-2" id="text-org44bda7e">
+<div id="outline-container-org785a113" class="outline-2">
+<h2 id="org785a113">Approach #2 Use :raw</h2>
+<div class="outline-text-2" id="text-org785a113">
 <p>
-To prevent a proliferation of different function names, generic functions
-are used for operations on time values. The semantics of these differ for
-the type of the operands.
-</p>
-</div>
-
-<div id="outline-container-org965462c" class="outline-3">
-<h3 id="org965462c">method time-add (a b)</h3>
-<div class="outline-text-3" id="text-org965462c">
-<p>
-→ value
+To quote Marijn, the :raw keyword takes a string and inserts it straight
+into the query. I try to stay away from :raw if possible, but sometimes&#x2026;
 </p>
 
-<p>
-Adds two time-related objects. Adding an interval to a date or timestamp
-will return a new date or timestamp, increased by the value of the interval.
-Adding two intervals returns a new interval with the sum of the two
-arguments. Integers can be used in place of intervals, and will be
-interpreted as an amount of milliseconds.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org79df090" class="outline-3">
-<h3 id="org79df090">method time-subtract (a b)</h3>
-<div class="outline-text-3" id="text-org79df090">
-<p>
-→ value
-</p>
-
-<p>
-Subtracts time-related objects from each other. Subtracting two dates or
-timestamps results in an interval that represents the difference between
-them. Similarly, subtracting two intervals also gives their difference.
-</p>
-</div>
-</div>
-
-<div id="outline-container-orgc6191a0" class="outline-3">
-<h3 id="orgc6191a0">method time= (a b)</h3>
-<div class="outline-text-3" id="text-orgc6191a0">
-<p>
-→ boolean
-</p>
-
-<p>
-Compare two time-related values, returns a boolean indicating whether
-they denote the same time or period.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org99daad6" class="outline-3">
-<h3 id="org99daad6">method time&lt; (a b)</h3>
-<div class="outline-text-3" id="text-org99daad6">
-<p>
-→ boolean
-</p>
-
-<p>
-Compare two time-related values, returns a boolean indicating whether the
-first is less than the second.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org5ea76ae" class="outline-3">
-<h3 id="org5ea76ae">method time&gt; (a b)</h3>
-<div class="outline-text-3" id="text-org5ea76ae">
-<p>
-→ boolean
-</p>
-
-<p>
-Compare two time-related values, returns a boolean indicating whether the
-first is greater than the second.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org96af6b8" class="outline-3">
-<h3 id="org96af6b8">function time&lt;= (a b)</h3>
-<div class="outline-text-3" id="text-org96af6b8">
-<p>
-→ boolean
-</p>
-
-<p>
-The inverse of time&gt;.
-</p>
-</div>
-</div>
-
-<div id="outline-container-org1af8d7c" class="outline-3">
-<h3 id="org1af8d7c">function time&gt;= (a b)</h3>
-<div class="outline-text-3" id="text-org1af8d7c">
-<p>
-→ boolean
-</p>
-
-<p>
-The inverse of time&lt;.
-</p>
+<div class="org-src-container">
+<pre class="src src-lisp">(query (:select (:raw "tmp1.name") :from (:as 'baz (:raw "tmp1"))))
+</pre>
 </div>
 </div>
 </div>
 </div>
 <div id="postamble" class="status">
-<p class="date">Created: 2018-08-23 Thu 14:56</p>
+<p class="date">Created: 2018-08-23 Thu 18:13</p>
 <p class="validation"><a href="http://validator.w3.org/check?uri=referer">Validate</a></p>
 </div>
 </body>

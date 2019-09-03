@@ -8,6 +8,7 @@
            #:database-error-query
            #:database-error-cause
            #:database-error-constraint-name
+           #:database-error-extract-name
            #:database-connection
            #:database-connection-error
            #:database-socket-error
@@ -49,6 +50,7 @@
            #:with-binary-row-values
            #:with-text-row-values
            #:*silently-truncate-rationals*
+           #:*silently-truncate-ratios*
            #:*query-callback*
            #:*query-log*
            #:open-db-writer
@@ -56,6 +58,8 @@
            #:close-db-writer
            #:*ssl-certificate-file*
            #:*ssl-key-file*
+           #:*retry-connect-times*
+           #:*retry-connect-delay*
            #+(and sbcl unix) #:*unix-socket-dir*))
 
 (defpackage :cl-postgres-error
@@ -63,9 +67,20 @@
   (:export #:admin-shutdown
            #:cannot-connect-now
            #:check-violation
+           #:columns-error
            #:crash-shutdown
            #:data-exception
            #:db-division-by-zero
+           #:undefined-column
+           #:duplicate-column
+           #:duplicate-cursor
+           #:duplicate-database
+           #:duplicate-function
+           #:duplicate-prepared-statement
+           #:duplicate-schema
+           #:duplicate-table
+           #:duplicate-alias
+           #:duplicate-object
            #:feature-not-supported
            #:floating-point-exception
            #:foreign-key-violation
@@ -79,6 +94,7 @@
            #:integrity-violation
            #:internal-error
            #:invalid-datetime-format
+           #:invalid-sql-statement-name
            #:lock-not-available
            #:not-null-violation
            #:numeric-value-out-of-range
@@ -204,8 +220,7 @@
            #:+fdw-handler+
            #:+index-am-handler+
            #:+tsm-handler+
-           #:+anyrange+
-           ))
+           #:+anyrange+))
 
 (in-package :cl-postgres)
 

@@ -7,9 +7,23 @@
    (column-map :reader dao-column-map))
   (:documentation "Metaclass for database-access-object classes."))
 
+(defgeneric dao-keys (class)
+  (:documentation "Returns list of slot names that are the primary key of DAO
+class. This is likely interesting if you have primary keys which are composed
+of more than one slot. Pay careful attention to situations where the primary
+key not only has more than one column, but they are actually in a different
+order than they are in the database table itself. You can check this with the
+find-primary-key-info function."))
+
 (defmethod dao-keys :before ((class dao-class))
   (unless (class-finalized-p class)
-    (finalize-inheritance class)))
+               #+postmodern-thread-safe
+               (unless (class-finalized-p class)
+                 (bordeaux-threads:with-lock-held (*class-finalize-lock*)
+                   (unless (class-finalized-p class)
+                     (finalize-inheritance class))))
+                 #-postmodern-thread-safe
+                 (finalize-inheritance class)))
 
 (defmethod validate-superclass ((class dao-class) (super-class standard-class))
   t)
@@ -82,7 +96,8 @@
   (setf (slot-value slot 'sql-name) (to-sql-name
                                      (if col-name-p
                                          col-name
-                                         (slot-definition-name slot))))
+                                         (slot-definition-name slot))
+                                     s-sql:*escape-sql-names-p* t))
   ;; The default for nullable columns defaults to :null.
   (when (and (null col-default) (consp col-type) (eq (car col-type) 'or)
              (member 'db-null col-type) (= (length col-type) 3))
@@ -134,9 +149,15 @@
 (defgeneric get-dao (type &rest args)
   (:method ((class-name symbol) &rest args)
     (let ((class (find-class class-name)))
-      (if (class-finalized-p class)
-          (error "Class ~a has no key slots." (class-name class))
-          (finalize-inheritance class))
+      (unless (class-finalized-p class)
+               #+postmodern-thread-safe
+               (unless (class-finalized-p class)
+                 (bordeaux-threads:with-lock-held (*class-finalize-lock*)
+                   (unless (class-finalized-p class)
+                     (finalize-inheritance class))))
+                 #-postmodern-thread-safe
+                 (finalize-inheritance class-name))
+      (when (not (dao-keys class)) (error "Class ~a has no key slots." (class-name class)))
       (apply 'get-dao class-name args)))
   (:documentation "Get the object corresponding to the given primary
   key, or return nil if it does not exist."))
@@ -146,7 +167,13 @@
       (apply 'make-dao class args)))
   (:method ((class dao-class) &rest args &key &allow-other-keys)
     (unless (class-finalized-p class)
-      (finalize-inheritance class))
+               #+postmodern-thread-safe
+               (unless (class-finalized-p class)
+                 (bordeaux-threads:with-lock-held (*class-finalize-lock*)
+                   (unless (class-finalized-p class)
+                     (finalize-inheritance class))))
+                 #-postmodern-thread-safe
+                 (finalize-inheritance class))
     (let ((instance (apply #'make-instance class args)))
       (insert-dao instance)))
   (:documentation "Make the instance of the given class and insert it into the database"))
@@ -172,7 +199,11 @@
   "Synthesise a number of methods for a newly defined DAO class.
 \(Done this way because some of them are not defined in every
 situation, and each of them needs to close over some pre-computed
-values.)"
+values. Notes for future maintenance: Fields are the slot names
+in a dao class. Field-sql-name returns the col-name for the
+postgresql table, which may or may not be the same as the slot
+names in the class and also may have no relation to the initarg
+or accessor or reader.)"
 
   (setf (slot-value class 'column-map)
         (mapcar (lambda (s) (cons (slot-sql-name s) (slot-definition-name s))) (dao-column-slots class)))
@@ -232,12 +263,12 @@ values.)"
                 :do (if (slot-boundp object field)
                         (push field bound)
                         (push field unbound)))
-
              (let* ((values (mapcan (lambda (x) (list (field-sql-name x) (slot-value object x)))
                                     (remove-if (lambda (x) (member x ghost-fields)) bound) ))
                     (returned (query (sql-compile `(:insert-into ,table-name
                                                                  :set ,@values
-                                                                 ,@(when unbound (cons :returning unbound))))
+                                                                 ,@(when unbound (cons :returning (mapcar #'field-sql-name
+                                                                                                          unbound)))))
                                      :row)))
                (when unbound
                  (loop :for value :in returned
@@ -282,7 +313,7 @@ arguments.")
 
 (defmacro with-column-writers ((&rest defs) &body body)
   `(let ((*custom-column-writers* (append (list ,@(loop :for (field writer) :on defs :by #'cddr
-                                                        :collect `(cons (to-sql-name ,field) ,writer)))
+                                                        :collect `(cons (to-sql-name ,field nil) ,writer)))
                                           *custom-column-writers*)))
     ,@body))
 
@@ -315,17 +346,29 @@ violation, update it instead."
   (handler-case (progn (insert-dao dao) t)
     (cl-postgres-error:unique-violation ()
       (update-dao dao)
+      nil)
+    (cl-postgres-error:columns-error ()
+      (update-dao dao)
       nil)))
 
 (defun save-dao/transaction (dao)
   (handler-case (with-savepoint save-dao/transaction (insert-dao dao) t)
     (cl-postgres-error:unique-violation ()
       (update-dao dao)
+      nil)
+    (cl-postgres-error:columns-error ()
+      (update-dao dao)
       nil)))
 
 (defun query-dao% (type query row-reader &rest args)
   (let ((class (find-class type)))
     (unless (class-finalized-p class)
+      #+postmodern-thread-safe
+      (unless (class-finalized-p class)
+        (bordeaux-threads:with-lock-held (*class-finalize-lock*)
+          (unless (class-finalized-p class)
+            (finalize-inheritance class))))
+      #-postmodern-thread-safe
       (finalize-inheritance class))
     (if args
 	(progn
@@ -386,8 +429,14 @@ representing that result."
   "Generate the appropriate CREATE TABLE query for this class."
   (unless (typep table 'dao-class)
     (setf table (find-class table)))
-  (unless (class-finalized-p table)
-    (finalize-inheritance table))
+      (unless (class-finalized-p table)
+      #+postmodern-thread-safe
+      (unless (class-finalized-p table)
+        (bordeaux-threads:with-lock-held (*class-finalize-lock*)
+          (unless (class-finalized-p table)
+            (finalize-inheritance table))))
+      #-postmodern-thread-safe
+      (finalize-inheritance table))
   (sql-compile
    `(:create-table ,(dao-table-name table)
                    ,(loop :for slot :in (dao-column-slots table)
