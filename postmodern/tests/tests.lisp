@@ -1,7 +1,4 @@
-(defpackage :postmodern-tests
-  (:use :common-lisp :fiveam :postmodern :simple-date :cl-postgres-tests)
-  (:shadow #:with-test-connection))
-
+;;;; -*- Mode: LISP; Syntax: Ansi-Common-Lisp; Base: 10; Package: POSTMODERN-TESTS; -*-
 (in-package :postmodern-tests)
 
 ;; Adjust the above to some db/user/pass/host combination that refers
@@ -10,22 +7,35 @@
 ;; (fiveam:run! :postmodern)
 
 (fiveam:def-suite :postmodern
-    :description "Test suite for postmodern subdirectory files")
+  :description "Test suite for postmodern subdirectory files")
 
 (fiveam:in-suite :postmodern)
 
+(fiveam:def-suite :postmodern-base
+  :description "Base test suite for postmodern"
+  :in :postmodern)
+
+(fiveam:in-suite :postmodern-base)
+
+(defun prompt-connection-to-postmodern-db-spec (param-lst)
+  "Takes the 6 item parameter list from prompt-connection and restates it for pomo:with-connection. Note that cl-postgres does not provide the pooled connection - that is only in postmodern - so that parameter is not passed."
+  (when (and (listp param-lst)
+             (= 6 (length param-lst)))
+    (destructuring-bind (db user password host port use-ssl) param-lst
+      (list db user password host :port port :use-ssl use-ssl))))
+
 (defmacro with-test-connection (&body body)
-  `(with-connection (prompt-connection) ,@body))
+  `(with-connection (prompt-connection-to-postmodern-db-spec (cl-postgres-tests:prompt-connection)) ,@body))
 
 (defmacro with-pooled-test-connection (&body body)
-  `(with-connection (append (prompt-connection) '(:pooled-p t)) ,@body))
+  `(with-connection (append (prompt-connection-to-postmodern-db-spec (cl-postgres-tests:prompt-connection)) '(:pooled-p t)) ,@body))
 
 (defmacro protect (&body body)
   `(unwind-protect (progn ,@(butlast body)) ,(car (last body))))
 
 (fiveam:def-suite :postmodern-base
-    :description "Base test suite for postmodern"
-    :in :postmodern)
+  :description "Base test suite for postmodern"
+  :in :postmodern)
 
 (fiveam:in-suite :postmodern-base)
 
@@ -34,7 +44,7 @@
     (is (not (null *database*)))))
 
 (test connection-pool
-  (let* ((db-params (append (prompt-connection) '(:pooled-p t)))
+  (let* ((db-params (append (prompt-connection-to-postmodern-db-spec (cl-postgres-tests:prompt-connection)) '(:pooled-p t)))
          (pooled (apply 'connect db-params)))
     (disconnect pooled)
     (let ((pooled* (apply 'connect db-params)))
@@ -51,7 +61,17 @@
     (disconnect *database*)
     (is (not (connected-p *database*)))
     (reconnect *database*)
-    (is (connected-p *database*))))
+    (is (connected-p *database*))
+    (is (equal (get-search-path)
+               "\"$user\", public"))
+    (is (equal
+         (with-schema ("a")
+           (disconnect *database*)
+           (reconnect *database*)
+           (get-search-path))
+         "a"))
+    (is (equal (get-search-path)
+               "\"$user\", public"))))
 
 (test simple-query
   (with-test-connection
@@ -75,11 +95,11 @@
         (cl-postgres:copy-sql-readtable
          simple-date-cl-postgres-glue:*simple-date-sql-readtable*))
   (with-test-connection
-    (is (time= (query (:select (:type (encode-date 1980 2 1) date)) :single)
+    (is (time= (query (:select (:type (simple-date:encode-date 1980 2 1) date)) :single)
                (encode-date 1980 2 1)))
-    (is (time= (query (:select (:type (encode-timestamp 2040 3 19 12 15 0 2) timestamp)) :single)
+    (is (time= (query (:select (:type (simple-date:encode-timestamp 2040 3 19 12 15 0 2) timestamp)) :single)
                (encode-timestamp 2040 3 19 12 15 0 2)))
-    (is (time= (query (:select (:type (encode-interval :month -1 :hour 24) interval)) :single)
+    (is (time= (query (:select (:type (simple-date:encode-interval :month -1 :hour 24) interval)) :single)
                (encode-interval :month -1 :hour 24))))
   ;;; Reset readtable to default
   (setf cl-postgres:*sql-readtable*
@@ -100,7 +120,7 @@
       (execute (:drop-table 'test-data)))
     (is (not (table-exists-p 'test-data)))))
 
-(test prepare
+(test base-prepare
   (with-test-connection
     (drop-prepared-statement "all")
     (when (table-exists-p 'test-data) (execute (:drop-table 'test-data)))
@@ -168,7 +188,9 @@
       (is (equal "select a from test_data where c = $1" (find-postgresql-prepared-statement "select1")))
       (is (equal "select a from test_data where c = $1" (find-postmodern-prepared-statement "select1")))
       ;; funcall now creates the new version
-      (is (eq :null (funcall 'select1 2)))
+      (if *allow-overwriting-prepared-statements*
+          (is (eq :null (funcall 'select1 2)))
+          (is (eq nil (funcall 'select1 2))))
       ;; Test to ensure that we do not recreate the statement each time it is funcalled
       (let ((time1 (query "select prepare_time from pg_prepared_statements where name = 'select1'" :single)))
         (format t "Sleep 1 to allow prepare_time comparison~%")
@@ -178,7 +200,9 @@
       (drop-prepared-statement "select1")
       (signals error (funcall 'select1 2))
       (defprepared select1 "select c from test_data where a = $1" :single)
-      (is (eq :null (funcall 'select1 2)))
+      (if *allow-overwriting-prepared-statements*
+          (is (eq :null (funcall 'select1 2)))
+          (is (eq :null (funcall 'select1 2))))
       (drop-prepared-statement "all")
       (is (equal 0 (length (list-prepared-statements t))))
       (is (equal 0 (length (list-postmodern-prepared-statements t))))
@@ -189,7 +213,7 @@
       (is (eq :null (funcall 'select1 2)))
       (execute (:drop-table 'test-data)))))
 
-(test prepare-reserved-words
+(test base-prepare-reserved-words
   (with-test-connection
     (drop-prepared-statement "all")
     (when (table-exists-p 'from-test) (execute (:drop-table 'from-test)))
@@ -197,14 +221,14 @@
     (execute (:insert-into 'from-test :set 'flight 1 'from "Stykkishólmur" :to-destination "Reykjavík"))
     (execute (:insert-into 'from-test :set 'flight 2 'from "Reykjavík" :to-destination "Seyðisfjörður"))
     (defprepared select1 "select \"from\" from from_test where to_destination = $1" :single)
-      ;; the funcall creates the prepared statements logged in the postmodern connection
-      ;; and the postgresql connection
-      (is (equal "Reykjavík" (funcall 'select1 "Seyðisfjörður")))
-      (execute (:drop-table 'from-test))))
+    ;; the funcall creates the prepared statements logged in the postmodern connection
+    ;; and the postgresql connection
+    (is (equal "Reykjavík" (funcall 'select1 "Seyðisfjörður")))
+    (execute (:drop-table 'from-test))))
 
-(test prepare-pooled
+(test base-prepare-pooled
   (with-pooled-test-connection
-        (drop-prepared-statement "all")
+    (drop-prepared-statement "all")
     (when (table-exists-p 'test-data) (execute (:drop-table 'test-data)))
     (execute (:create-table test-data ((a :type integer :primary-key t)
                                        (b :type real)
@@ -267,20 +291,30 @@
       ;; Defprepared does not change the prepared statements logged in the postmodern connection or
       ;; in the postgresql connection. That happens at funcall.
       ;; Test still the original in both postgresql and postmodern
-      (is (equal "select a from test_data where c = $1" (find-postgresql-prepared-statement "select1")))
-      (is (equal "select a from test_data where c = $1" (find-postmodern-prepared-statement "select1")))
+      (is (equal "select a from test_data where c = $1"
+                 (find-postgresql-prepared-statement "select1")))
+      (is (equal "select a from test_data where c = $1"
+                 (find-postmodern-prepared-statement "select1")))
       ;; funcall now creates the new version
-      (is (eq :null (funcall 'select1 2)))
+      (if *allow-overwriting-prepared-statements*
+          (is (eq :null (funcall 'select1 2)))
+          (is (eq nil (funcall 'select1 2))))
+
       ;; Test to ensure that we do not recreate the statement each time it is funcalled
-      (let ((time1 (query "select prepare_time from pg_prepared_statements where name = 'select1'" :single)))
+      (let ((time1 (query "select prepare_time from pg_prepared_statements where name = 'select1'"
+                          :single)))
         (format t "Sleep 1 to allow prepare_time comparison~%")
         (sleep 1)
         (funcall 'select1 2)
-        (is (equal time1 (query "select prepare_time from pg_prepared_statements where name = 'select1'" :single))))
+        (is (equal time1
+                   (query "select prepare_time from pg_prepared_statements where name = 'select1'"
+                          :single))))
       (drop-prepared-statement "select1")
       (signals error (funcall 'select1 2))
       (defprepared select1 "select c from test_data where a = $1" :single)
-      (is (eq :null (funcall 'select1 2)))
+      (if *allow-overwriting-prepared-statements*
+          (is (eq :null (funcall 'select1 2)))
+          (is (eq :null (funcall 'select1 2))))
       (drop-prepared-statement "all")
       (is (equal 0 (length (list-prepared-statements t))))
       (is (equal 0 (length (list-postmodern-prepared-statements t))))
@@ -290,12 +324,12 @@
       (is (eq :null (funcall 'select1 2)))
       (execute (:drop-table 'test-data)))))
 
-(test prepared-statement-over-reconnect
+(test base-prepared-statement-over-reconnect
   (let ((terminate-backend
           (prepare
-              "SELECT pg_terminate_backend($1) WHERE pg_backend_pid() = $1"
-              :rows))
-         (getpid (prepare "SELECT pg_backend_pid()" :single)))
+           "SELECT pg_terminate_backend($1) WHERE pg_backend_pid() = $1"
+           :rows))
+        (getpid (prepare "SELECT pg_backend_pid()" :single)))
     (with-test-connection
       (is (equal (query "select pg_backend_pid()" :single)
                  (funcall getpid)))
@@ -312,8 +346,8 @@
       (is (equal (query "select pg_backend_pid()" :single)
                  (funcall getpid)))
       (is (equal (funcall getpid) (pomo:get-pid-from-postmodern)))
-        (funcall getpid)
-        (is-true (query "select pg_backend_pid()" :single)))
+      (funcall getpid)
+      (is-true (query "select pg_backend_pid()" :single)))
 
     ;; A regular query does not have the built-in exception handling
     ;; available to prepared statements, so this will trigger the
@@ -365,79 +399,79 @@
           (is (null rows))
           (is (zerop count)))))))
 
-(test prepared-statement-over-reconnect-pooled-1
+(test base-prepared-statement-over-reconnect-pooled-1
   (with-pooled-test-connection
     (drop-prepared-statement "all")
-       (let ((terminate-backend
-              (prepare
-               "SELECT pg_terminate_backend($1) WHERE pg_backend_pid() = $1"
-               :rows))
-             (getpid (prepare "SELECT pg_backend_pid()" :single)))
-         ;; Demonstrate that a prepared statement will reconnect
-         ;; even if it is a termination
+    (let ((terminate-backend
+            (prepare
+             "SELECT pg_terminate_backend($1) WHERE pg_backend_pid() = $1"
+             :rows))
+          (getpid (prepare "SELECT pg_backend_pid()" :single)))
+      ;; Demonstrate that a prepared statement will reconnect
+      ;; even if it is a termination
 
-         (is (equal (query "select pg_backend_pid()" :single)
-                    (funcall getpid)))
-         (is (equal (funcall getpid) (pomo:get-pid-from-postmodern)))
-         (let ((pid (pomo:get-pid)))
-           (pomo:terminate-backend pid)
-           (signals database-connection-error
-                    (query "select pg_backend_pid()" :single)))
+      (is (equal (query "select pg_backend_pid()" :single)
+                 (funcall getpid)))
+      (is (equal (funcall getpid) (pomo:get-pid-from-postmodern)))
+      (let ((pid (pomo:get-pid)))
+        (pomo:terminate-backend pid)
+        (signals database-connection-error
+          (query "select pg_backend_pid()" :single)))
 
-         (funcall getpid)
-         (sleep 1)
-         (is (integerp (query "select pg_backend_pid()" :single)))
-         (is (equal (funcall getpid) (pomo:get-pid-from-postmodern)))
-         (funcall getpid)
-         (is-true (query "select pg_backend_pid()" :single))
+      (funcall getpid)
+      (sleep 1)
+      (is (integerp (query "select pg_backend_pid()" :single)))
+      (is (equal (funcall getpid) (pomo:get-pid-from-postmodern)))
+      (funcall getpid)
+      (is-true (query "select pg_backend_pid()" :single))
 
-         ;; A regular query does not have the built-in exception handling
-         ;; available to prepared statements, so this will trigger the
-         ;; exception handling below, setting reconnected to true.
-         (let ((original-pid (funcall getpid))
-               (reconnectedp nil))
-           (block done
-             (handler-bind
-                 ((database-connection-error
-                   (lambda (condition)
-                     (let ((restart (find-restart :reconnect condition)))
-                       (is (not (null restart)))
-                       (setq reconnectedp t)
-                       (invoke-restart restart)))))
-               (pomo:terminate-backend original-pid)
-               (is-true (query "select pg_backend_pid()" :single))
-               (is-true reconnectedp)
-               (is (/= original-pid (funcall getpid)))))
+      ;; A regular query does not have the built-in exception handling
+      ;; available to prepared statements, so this will trigger the
+      ;; exception handling below, setting reconnected to true.
+      (let ((original-pid (funcall getpid))
+            (reconnectedp nil))
+        (block done
+          (handler-bind
+              ((database-connection-error
+                 (lambda (condition)
+                   (let ((restart (find-restart :reconnect condition)))
+                     (is (not (null restart)))
+                     (setq reconnectedp t)
+                     (invoke-restart restart)))))
+            (pomo:terminate-backend original-pid)
+            (is-true (query "select pg_backend_pid()" :single))
+            (is-true reconnectedp)
+            (is (/= original-pid (funcall getpid)))))
 
-           ;; Re-using the prepared statement on the new connection.
-           (multiple-value-bind (rows count)
-               (funcall terminate-backend 0)
-             (is (null rows))
-             (is (zerop count))))
+        ;; Re-using the prepared statement on the new connection.
+        (multiple-value-bind (rows count)
+            (funcall terminate-backend 0)
+          (is (null rows))
+          (is (zerop count))))
 
-         ;; A funcall to a prepared statement reconnects on its own
-         ;; without acdessing the database-connection-error handler
-         ;; above, so reconnectedp will still be nil
-         (let ((original-pid (funcall getpid))
-               (reconnectedp nil))
-           (block done
-             (handler-bind
-                 ((database-connection-error
-                   (lambda (condition)
-                     (let ((restart (find-restart :reconnect condition)))
-                       (is (not (null restart)))
-                       (setq reconnectedp t)
-                       (invoke-restart restart)))))
-               (pomo:terminate-backend original-pid)
-               (is-true (funcall getpid))
-               (is-false reconnectedp)
-               (is (/= original-pid (funcall getpid)))))
+      ;; A funcall to a prepared statement reconnects on its own
+      ;; without acdessing the database-connection-error handler
+      ;; above, so reconnectedp will still be nil
+      (let ((original-pid (funcall getpid))
+            (reconnectedp nil))
+        (block done
+          (handler-bind
+              ((database-connection-error
+                 (lambda (condition)
+                   (let ((restart (find-restart :reconnect condition)))
+                     (is (not (null restart)))
+                     (setq reconnectedp t)
+                     (invoke-restart restart)))))
+            (pomo:terminate-backend original-pid)
+            (is-true (funcall getpid))
+            (is-false reconnectedp)
+            (is (/= original-pid (funcall getpid)))))
 
-           ;; Re-using the prepared statement on the new connection.
-           (multiple-value-bind (rows count)
-               (funcall terminate-backend 0)
-             (is (null rows))
-             (is (zerop count)))))))
+        ;; Re-using the prepared statement on the new connection.
+        (multiple-value-bind (rows count)
+            (funcall terminate-backend 0)
+          (is (null rows))
+          (is (zerop count)))))))
 
 (test doquery
   (with-test-connection
@@ -448,182 +482,8 @@
 (test doquery-params
   (with-test-connection
     (doquery ("select $1::integer + 10" 20) (answer)
-       (is (= answer 30)))))
+      (is (= answer 30)))))
 
-(test transaction
-  (with-test-connection
-    (when (table-exists-p 'test-data) (execute (:drop-table 'test-data)))
-    (execute (:create-table test-data ((value :type integer))))
-    (protect
-      (with-transaction ()
-          (execute (:insert-into 'test-data :set 'value 77)))
-      (is (equal (query (:select '* :from 'test-data) :single)
-                 77))
-      (with-transaction (george)
-        (execute (:insert-into 'test-data :set 'value 22)))
-      (is (equal (query (:select '* :from 'test-data))
-                 '((77) (22))))
-      (with-transaction (george :read-committed-rw)
-        (execute (:insert-into 'test-data :set 'value 33)))
-      (is (equal (query (:select '* :from 'test-data))
-                 '((77) (22) (33))))
-      (with-transaction (:serializable)
-        (execute (:insert-into 'test-data :set 'value 44)))
-      (is (equal (query (:select '* :from 'test-data))
-                 '((77) (22) (33) (44))))
-      ;; Reset table -  Now try errors
-      (query (:truncate 'test-data))
-      (is (= 0 (length (query (:select '* :from 'test-data)))))
-      (ignore-errors
-          (with-transaction ()
-            (execute (:insert-into 'test-data :set 'value 2))
-            (error "no wait")))
-      (is (= 0 (length (query (:select '* :from 'test-data)))))
-      (ignore-errors
-        (with-transaction (transaction)
-          (execute (:insert-into 'test-data :set 'value 2))
-          (commit-transaction transaction)
-          (error "no wait!!")))
-      (is (= 1 (length (query (:select '* :from 'test-data)))))
-      (ignore-errors
-        (with-transaction (george :read-committed-rw)
-          (execute (:insert-into 'test-data :set 'value 2))
-          (error "no wait")))
-      (is (= 1 (length (query (:select '* :from 'test-data)))))
-      (ignore-errors
-        (with-transaction (:serializable)
-          (execute (:insert-into 'test-data :set 'value 2))
-          (error "no wait")))
-      (is (= 1 (length (query (:select '* :from 'test-data)))))
-      ;; Now try abort
-      (with-transaction (transaction)
-        (execute (:insert-into 'test-data :set 'value 44))
-        (abort-transaction transaction))
-      (is (= 1 (length (query (:select '* :from 'test-data)))))
-      (ignore-errors
-        (with-transaction (george :read-committed-rw)
-          (execute (:insert-into 'test-data :set 'value 23))
-          (abort-transaction george)))
-      (is (= 1 (length (query (:select '* :from 'test-data)))))
-      (execute (:drop-table 'test-data)))))
-
-(test logical-transaction
-  (with-test-connection
-    (protect
-      (when (table-exists-p 'test-data) (execute (:drop-table 'test-data)))
-      (execute (:create-table 'test-data ((value :type integer))))
-      (with-logical-transaction ()
-        (execute (:insert-into 'test-data :set 'value 1))
-        (ignore-errors
-          (with-logical-transaction ()
-            (execute (:insert-into 'test-data :set 'value 2))
-            (error "fail here"))))
-      (is-true (query (:select '* :from 'test-data :where (:= 'value 1))))
-      (is-false (query (:select '* :from 'test-data :where (:= 'value 2))))
-      (with-logical-transaction ()
-        (execute (:insert-into 'test-data :set 'value 77)))
-      (is-true (query (:select '* :from 'test-data :where (:= 'value 77))))
-      (with-logical-transaction ()
-        (execute (:insert-into 'test-data :set 'value 22)))
-      (is-true (query (:select '* :from 'test-data :where (:= 'value 22))))
-      (with-logical-transaction (george :read-committed-rw)
-        (declare (ignore george))
-        (execute (:insert-into 'test-data :set 'value 33)))
-      (is-true (query (:select '* :from 'test-data :where (:= 'value 33))))
-      (with-logical-transaction (:serializable)
-        (execute (:insert-into 'test-data :set 'value 44)))
-      (is-true (query (:select '* :from 'test-data :where (:= 'value 44))))
-      (signals database-error
-        (with-logical-transaction (:read-committed-ro)
-          (execute (:insert-into 'test-data :set 'value 29))))
-      (execute (:drop-table 'test-data)))))
-
-(test transaction-commit-hooks
-  (with-test-connection
-    (protect
-      (when (table-exists-p 'test-data) (execute (:drop-table 'test-data)))
-      (execute (:create-table test-data ((value :type integer))))
-      (with-logical-transaction (transaction-1)
-        (execute (:insert-into 'test-data :set 'value 1))
-        (with-logical-transaction (transaction-2)
-          (push (lambda () (execute (:insert-into 'test-data :set 'value 3))) (commit-hooks transaction-2))
-          (push (lambda () (execute (:insert-into 'test-data :set 'value 4))) (commit-hooks transaction-1))
-          (execute (:insert-into 'test-data :set 'value 2))))
-      (is (= 4 (length (query (:select '* :from 'test-data)))))
-      (execute (:drop-table 'test-data)))))
-
-(test transaction-abort-hooks
-  (with-test-connection
-    (protect
-      (when (table-exists-p 'test-data) (execute (:drop-table 'test-data)))
-      (execute (:create-table test-data ((value :type integer))))
-      (with-logical-transaction (transaction-1)
-        (execute (:insert-into 'test-data :set 'value 1))
-        (ignore-errors
-          (with-logical-transaction (transaction-2)
-            (push (lambda () (execute (:insert-into 'test-data :set 'value 3))) (abort-hooks transaction-2))
-            (push (lambda () (execute (:insert-into 'test-data :set 'value 4))) (abort-hooks transaction-1))
-            (error "no wait")
-            (execute (:insert-into 'test-data :set 'value 2)))))
-      (is (= 2 (length (query (:select '* :from 'test-data)))))
-      (execute (:drop-table 'test-data)))))
-
-(test ensure-transaction
-  (with-test-connection
-    (with-transaction ()
-      (ensure-transaction
-        (is (eql postmodern::*transaction-level* 1))))
-    (is (eql postmodern::*transaction-level* 0))
-    (ensure-transaction
-      (is (eql postmodern::*transaction-level* 1)))))
-
-(test transaction-nested-warning "Transaction test nested warning"
-  (with-test-connection
-    (if (pomo:table-exists-p 'test-data)
-        (query (:truncate 'test-data))
-        (execute (:create-table test-data ((value :type integer)))))
-    (with-transaction (george :read-committed-rw)
-      (signals cl-postgres:postgresql-warning
-        (with-transaction (foo :read-committed-rw)
-          (execute (:insert-into 'test-data :set 'value 27)))))
-    (execute (:drop-table 'test-data))))
-
-(test transaction-logical-nested "Transaction test logical nested"
-  (with-test-connection
-    (if (pomo:table-exists-p 'test-data)
-        (query (:truncate 'test-data))
-        (execute (:create-table test-data ((value :type integer)))))
-    (with-logical-transaction (:read-committed-rw)
-      (with-logical-transaction (:read-committed-rw)
-        (execute (:insert-into 'test-data :set 'value 28))))
-    (is (equal (query (:select '* :from 'test-data) :single)
-               28))
-    (execute (:drop-table 'test-data))))
-
-(test cursor
-  (is (equal (with-test-connection
-                    (query (:create-table (:temp 'test-data1) ((value :type integer))))
-                    (loop for x from 1 to 100 do (execute (:insert-into 'test-data1 :set 'value x)))
-                    (with-transaction ()
-                      (execute "declare test_data1_values cursor with hold for select * from test_data1")
-                      (query "fetch forward 2 from test_data1_values")))
-             '((1) (2))))
-  (is (equal (with-test-connection
-                    (query (:create-table (:temp 'test-data1) ((value :type integer))))
-                    (loop for x from 1 to 100 do (execute (:insert-into 'test-data1 :set 'value x)))
-                    (with-transaction ()
-                      (execute "declare test_data1_values cursor with hold for select * from test_data1")
-                      (query "fetch forward 2 from test_data1_values"))
-                    (query "fetch next from test_data1_values"))
-             '((3))))
-  (is (equal (with-test-connection
-                    (query (:create-table (:temp 'test-data1) ((value :type integer))))
-                    (loop for x from 1 to 100 do (execute (:insert-into 'test-data1 :set 'value x)))
-                    (with-transaction ()
-                      (execute "declare test_data1_values cursor with hold for select * from test_data1")
-                      (query "fetch forward 2 from test_data1_values"))
-                    (query "fetch forward 5 from test_data1_values"))
-             '((3) (4) (5) (6) (7)))))
 
 (test notification
   (with-test-connection
@@ -636,7 +496,7 @@
   (is (equal (split-fully-qualified-tablename 'uniq.george)
              '("george" "uniq" NIL)))
   (is (equal (split-fully-qualified-tablename "george-and-gracie")
-             '("george_and_gracie" NIL NIL)))
+             '("george_and_gracie" "public" NIL)))
   (is (equal (split-fully-qualified-tablename "test.uniq.george-and-gracie")
              '("george_and_gracie" "uniq" "test")))
   (is (equal (split-fully-qualified-tablename 'test.uniq.george-and-gracie)
@@ -646,31 +506,39 @@
 ;; namespaces.
 (test namespace
   (with-test-connection
+    (let ((excess-schemas
+            (set-difference (list-schemas)
+                            '("public" "information_schema" "uniq")
+                            :test #'equal)))
+      (when excess-schemas (loop for x in excess-schemas do
+        (drop-schema x :cascade 't))))
     (when (table-exists-p 'test-uniq)
       (execute (:drop-table 'test-uniq)))
-    (when (schema-exists-p 'uniq)
-      (drop-schema 'uniq :cascade 't))
     (is (schema-exists-p :public))
     (is (not (table-exists-p 'test-uniq)))
     (unless (table-exists-p 'test-uniq)
       (execute (:create-table test-uniq ((value :type integer)))))
     (is (table-exists-p 'test-uniq))
     (is (not (schema-exists-p 'uniq)))
+    (is (eq (column-exists-p 'public.test-uniq 'value) t))
+    (is (not (eq (column-exists-p 'public.test-uniq 'valuea) t)))
+    (is (eq (column-exists-p 'test-uniq 'value 'public) t))
+    (is (not (eq (column-exists-p 'test-uniq 'valuea 'public) t)))
     (with-schema ('uniq :if-not-exist :create) ;; changing the search path
       (is (schema-exists-p 'uniq))
       (is (schema-exists-p "uniq"))
-      (is (not (table-exists-p 'test-uniq)))
+      (is (not (table-exists-p 'test-uniq 'uniq)))
       (execute (:create-table test-uniq ((value :type integer))))
       (is (table-exists-p 'test-uniq))
       (execute (:drop-table 'test-uniq)))
     (query (:create-table 'uniq.gracie ((id :type integer))))
     (is (equal (list-tables-in-schema "uniq")
-        '("gracie")))
+               '(("gracie"))))
     (is (equal (list-tables-in-schema 'uniq)
-        '("gracie")))
+               '(("gracie"))))
     (query (:create-table "uniq.george" ((id :type integer))))
     (is (equal (list-tables-in-schema "uniq")
-        '("george" "gracie")))
+               '(("george") ("gracie"))))
     (is (table-exists-p "test.uniq.george"))
     (is (table-exists-p "uniq.george"))
     (is (table-exists-p "george" "uniq"))
@@ -722,57 +590,62 @@ and second the string name for the datatype."
   (is (equal (sql (postmodern::make-list-query "i"))
              "E'((SELECT relname FROM pg_catalog.pg_class INNER JOIN pg_catalog.pg_namespace ON (relnamespace = pg_namespace.oid) WHERE ((relkind = E''i'') and (nspname NOT IN (E''pg_catalog'', E''pg_toast'')) and pg_catalog.pg_table_is_visible(pg_class.oid))) ORDER BY relname)'")))
 
-(test list-indexes-and-constraints
+(test list-indices-and-constraints
   "Test various index functions"
   (with-test-connection
-    (when (table-exists-p 'test-uniq)
-      (execute (:drop-table 'test-uniq)))
-    (query (:create-table 'test-uniq ((id :type integer))
-                          (:primary-key 'id)))
+    (pomo:drop-table 'people :if-exists t :cascade t)
+    (query (:create-table 'people ((id :type (or integer db-null) :primary-key :identity-by-default)
+                                   (first-name :type (or (varchar 50) db-null))
+                                   (last-name :type (or (varchar 50) db-null)))))
+    (query (:create-index 'idx-people-names :on 'people :fields 'last-name 'first-name))
+    (query (:create-index 'idx-people-first-names :on 'people :fields 'first-name))
+    (query (:insert-rows-into 'people
+            :columns 'first-name 'last-name
+            :values '(("Eliza" "Gregory")  ("Dean" "Rodgers")  ("Christine" "Alvarez")
+                      ("Dennis" "Peterson") ("Ernest" "Roberts") ("Jorge" "Wood")
+                      ("Harvey" "Strickland") ("Eugene" "Rivera")
+                      ("Tillie" "Bell")  ("Marie" "Lloyd")  ("John" "Lyons")
+                      ("Lucas" "Gray")  ("Edward" "May")
+                      ("Randy" "Fields")  ("Nell" "Malone")  ("Jacob" "Maxwell")
+                      ("Vincent" "Adams") ("Henrietta" "Schneider")
+                      ("Ernest" "Mendez")  ("Jean" "Adams")  ("Olivia" "Adams"))))
     (let ((idx-symbol (first (list-indices)))
           (idx-string (first (list-indices t))))
       (is (pomo:index-exists-p idx-symbol))
       (is (pomo:index-exists-p idx-string)))
-    (is (equal (list-table-indices "test-uniq")
-               '(:TEST-UNIQ-PKEY :ID)))
-    (is (equal (list-table-indices 'test-uniq)
-               '(:TEST-UNIQ-PKEY :ID)))
-    (is (equal (list-table-indices "test-uniq" t)
-               '("test_uniq_pkey" "id")))
-    (is (equal (list-table-indices 'test-uniq t)
-               '("test_uniq_pkey" "id")))
-    (execute (:drop-table 'test-uniq))
-    (query (:create-table 'test-uniq ((id :type integer))
-                          (:primary-key "id")))
-    (is (equal (list-table-indices "test-uniq")
-               '(:TEST-UNIQ-PKEY :ID)))
-    (is (equal (list-table-indices 'test-uniq)
-               '(:TEST-UNIQ-PKEY :ID)))
-    (is (equal (list-table-indices "test-uniq" t)
-               '("test_uniq_pkey" "id")))
-    (is (equal (list-table-indices 'test-uniq t)
-               '("test_uniq_pkey" "id")))
-    (is (equal (list-unique-or-primary-constraints "test-uniq")
-               '(("test_uniq_pkey"))))
-    (is (equal (list-unique-or-primary-constraints 'test-uniq)
-               '(("test_uniq_pkey"))))
-    (is (equal (length (list-all-constraints 'test-uniq))
+    (is (equal (list-table-indices 'people)
+               '((:IDX-PEOPLE-FIRST-NAMES :FIRST-NAME) (:IDX-PEOPLE-NAMES :FIRST-NAME)
+                 (:IDX-PEOPLE-NAMES :LAST-NAME) (:PEOPLE-PKEY :ID))))
+    (is (equal (list-table-indices 'people t)
+               '(("idx_people_first_names" "first_name") ("idx_people_names" "first_name")
+                 ("idx_people_names" "last_name") ("people_pkey" "id"))))
+    (is (equal (list-table-indices "people")
+               '((:IDX-PEOPLE-FIRST-NAMES :FIRST-NAME) (:IDX-PEOPLE-NAMES :FIRST-NAME)
+                 (:IDX-PEOPLE-NAMES :LAST-NAME) (:PEOPLE-PKEY :ID))))
+    (is (equal (list-table-indices "people" t)
+               '(("idx_people_first_names" "first_name") ("idx_people_names" "first_name")
+                 ("idx_people_names" "last_name") ("people_pkey" "id"))))
+    (is (equal (list-unique-or-primary-constraints "people" t)
+               '(("people_pkey"))))
+    (is (equal (list-unique-or-primary-constraints "people")
+               '((:PEOPLE-PKEY))))
+    (is (equal (length (list-all-constraints 'people))
                2))
-    (is (equal (length (list-all-constraints "test-uniq"))
+    (is (equal (length (list-all-constraints "people"))
                2))
-    (query (:alter-table 'test-uniq :drop-constraint 'test-uniq-pkey))
-    (is (equal (length (list-all-constraints "test-uniq"))
+    (query (:alter-table 'people :drop-constraint 'people-pkey))
+    (is (equal (length (list-all-constraints "people"))
                1))
-    (execute (:drop-table 'test-uniq))))
+    (execute (:drop-table 'people))))
 
-(test drop-indexes
+(test drop-indices
   "Test drop index variations"
   (with-test-connection
     (query (:drop-table :if-exists 'george :cascade))
     (query (:create-table 'george ((id :type integer))))
     (query (:create-index 'george-idx :on 'george :fields 'id))
     (is (equal (list-table-indices 'george)
-               '(:GEORGE-IDX :ID)))
+               '((:GEORGE-IDX :ID))))
     (is (index-exists-p 'george-idx))
     (query (:drop-index :if-exists 'george-idx))
     (is (not (index-exists-p 'george-idx)))
@@ -876,3 +749,98 @@ and second the string name for the datatype."
     (is (eq (sequence-exists-p 'knobo-seq)
             nil))
     (query (:drop-table 'seq-test))))
+
+(test schema-comments
+  (with-test-connection
+    (when (schema-exists-p "schema_1")
+      (drop-schema "schema_1" :cascade t))
+    (create-schema "schema_1")
+    (when (table-exists-p "p1")
+      (drop-table "p1" :cascade t))
+    (query (:create-table "p1"
+                          ((id :type integer :generated-as-identity-always t)
+                           (text :type text))))
+    (query (:create-table "schema_1.s1"
+                          ((id :type integer :generated-as-identity-always t)
+                           (text :type text))))
+    (add-comment :table 'p1 "a comment on receipes")
+    (add-comment :table 'schema-1.s1 "a comment on schema-1 s1")
+    (is (equal (get-table-comment 'p1)
+               "a comment on receipes"))
+    (is (equal (integerp (get-table-oid 'schema-1.s1)) t))
+    (is (equal (integerp (get-table-oid 'information-schema.columns)) t))
+    (is (equal (get-table-comment 'schema-1.s1)
+               "a comment on schema-1 s1"))
+    (drop-schema "schema_1" :cascade t)
+    (drop-table "p1" :cascade t)))
+
+(test valid-sql-identifier-p
+  (is (equal (valid-sql-identifier-p "abc") T))
+  (is (equal (valid-sql-identifier-p "_abc3") T))
+  (is (equal (valid-sql-identifier-p "abc-3") NIL))
+  (is (equal (valid-sql-identifier-p "abc$q7") T))
+  (is (equal (valid-sql-identifier-p "_abc;'sd") NIL))
+  (is (equal (valid-sql-identifier-p "haček") T))
+  (is (equal (valid-sql-identifier-p "Tuđman") T))
+  (is (equal (valid-sql-identifier-p "Åland") T))
+  (is (equal (valid-sql-identifier-p "hôtel") T))
+  (is (equal (valid-sql-identifier-p "piñata") T))
+  (is (equal (valid-sql-identifier-p "frappé") T))
+  (is (equal (valid-sql-identifier-p "تَشْكِيل") NIL))
+  (is (equal (valid-sql-identifier-p "تسير") T))
+  (is (equal (valid-sql-identifier-p "إمرأة") T))
+  (is (equal (valid-sql-identifier-p "أهلا") T))
+  (is (equal (valid-sql-identifier-p "أداة") T))
+  (is (equal (valid-sql-identifier-p "شخصا") T))
+  (is (equal (valid-sql-identifier-p "새우") T))
+  (is (equal (valid-sql-identifier-p "이해") T))
+  (is (equal (valid-sql-identifier-p "죄") T))
+  (is (equal (valid-sql-identifier-p "国") T))
+  (is (equal (valid-sql-identifier-p "高さ") T))
+  (is (equal (valid-sql-identifier-p "たかさ") T))
+  (is (equal (valid-sql-identifier-p "住所") T))
+  (is (equal (valid-sql-identifier-p "会议") T))
+  (is (equal (valid-sql-identifier-p "kusipää") T)))
+
+(test rename-table-and-columns
+  (with-test-connection
+    (when (schema-exists-p 'test-schema)
+      (drop-schema 'test-schema :cascade t :if-exists t))
+    (create-schema 'test-schema)
+    (when (table-exists-p 'test-schema.t1)
+      (drop-table 'test-schema.t1 :if-exists t :cascade t))
+    (when (table-exists-p 'test-rename-t1)
+      (drop-table 'test-rename-t1 :if-exists t :cascade t))
+    (when (table-exists-p 'test-rename-t2)
+      (drop-table 'test-rename-t2 :if-exists t :cascade t))
+    (when (table-exists-p 'test-rename-t3)
+      (drop-table 'test-rename-t3 :if-exists t :cascade t))
+    (query (:create-table 'test-schema.t1 ((id :type (or integer db-null)))))
+    (query (:create-table 'test-rename-t1 ((id :type (or integer db-null)))))
+    (is (table-exists-p 'test-schema.t1))
+    (is (rename-table 'test-schema.t1 'test-schema.t2))
+    (is (table-exists-p 'test-schema.t2))
+    (is (rename-table 'test-schema.t2 't3))
+    (is (table-exists-p 'test-schema.t3))
+    (is (column-exists-p 'test-schema.t3 'id))
+    (is (rename-column 'test-schema.t3 'id 'new-id))
+    (is (column-exists-p 'test-schema.t3 'new-id))
+    (is (rename-column 'test-schema.t3 "new_id" "id"))
+    (is (column-exists-p "test-schema.t3" "id"))
+    (is (rename-table "test-schema.t3" "t2"))
+    (is (table-exists-p "test-schema.t2"))
+    (is (table-exists-p 'test-rename-t1))
+    (is (rename-table 'test-rename-t1 'test-rename-t2))
+    (is (table-exists-p 'test-rename-t2))
+    (is (rename-table 'test-rename-t2 'test-rename-t3))
+    (is (table-exists-p 'test-rename-t3))
+    (is (column-exists-p 'test-rename-t3 'id))
+    (is (rename-column 'test-rename-t3 'id 'new-id))
+    (is (column-exists-p 'test-rename-t3 'new-id))
+    (is (rename-column 'test-rename-t3 "new_id" "id"))
+    (is (column-exists-p "test-rename-t3" "id"))
+    (is (rename-table "test-rename-t3" "test-rename-t2"))
+    (is (table-exists-p "test-rename-t2"))
+    (drop-table 'test-rename-t2 :if-exists t :cascade t)
+    (drop-table 'test-schema.t2 :if-exists t :cascade t)
+    (drop-schema 'test-schema :cascade t :if-exists t)))

@@ -1,16 +1,9 @@
+;;;; -*- Mode: LISP; Syntax: Ansi-Common-Lisp; Base: 10; Package: CL-POSTGRES-TRIVIAL-UTF-8; -*-
+
 ;;; Minimal utf-8 decoding and encoding library.
 ;;;
-;;; See http://common-lisp.net/project/trivial-utf-8/
-
-(defpackage :cl-postgres-trivial-utf-8
-  (:use :common-lisp)
-  (:export #:utf-8-byte-length
-           #:string-to-utf-8-bytes
-           #:write-utf-8-bytes
-           #:utf-8-group-size
-           #:utf-8-bytes-to-string
-           #:read-utf-8-string
-           #:utf-8-decoding-error))
+;;; See http://common-lisp.net/project/trivial-utf-8/ (no longer maintained?)
+;;; This file is being kept in case we need to make patches or additions
 
 (in-package :cl-postgres-trivial-utf-8)
 
@@ -154,7 +147,7 @@ extract the character starting at the given start position."
 
 (defun utf-8-bytes-to-string (bytes-in &key (start 0) (end (length bytes-in)))
   "Convert a byte array containing utf-8 encoded characters into
-the string it encodes." 
+the string it encodes."
   (declare (type vector bytes-in)
            (type fixnum start end)
            #.*optimize*)

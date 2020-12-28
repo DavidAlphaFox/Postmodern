@@ -1,7 +1,4 @@
-(defpackage :s-sql-tests
-  (:use :common-lisp :fiveam :s-sql :cl-postgres :cl-postgres-error :cl-postgres-tests :postmodern)
-  (:shadow #:with-test-connection))
-
+;;;; -*- Mode: LISP; Syntax: Ansi-Common-Lisp; Base: 10; Package: S-SQL-TESTS; -*-
 (in-package :s-sql-tests)
 
 ;; Adjust the above to some db/user/pass/host/[port] combination that
@@ -13,8 +10,25 @@
 
 (fiveam:in-suite :s-sql)
 
+(fiveam:def-suite :s-sql-base
+    :description "Base suite for s-sql"
+    :in :s-sql)
+
+(in-suite :s-sql-base)
+
+(defun prompt-connection-to-s-sql-db-spec (param-lst)
+  "Takes the 6 item parameter list from prompt-connection and restates it for pomo:with-connection. Note that cl-postgres does not provide the pooled connection - that is only in postmodern - so that parameter is not passed."
+  (when (and (listp param-lst)
+             (= 6 (length param-lst)))
+    (destructuring-bind (db user password host port use-ssl) param-lst
+      (list db user password host :port port :use-ssl use-ssl))))
+
+(defvar *s-sql-db-spec* '()
+  "A list of connection parameters to use when running the tests.  The order is: database name, user, password, hostname, port and use-ssl.")
+
 (defmacro with-test-connection (&body body)
-  `(with-connection (prompt-connection) ,@body))
+  `(pomo:with-connection (prompt-connection-to-s-sql-db-spec
+                          (cl-postgres-tests:prompt-connection)) ,@body))
 
 (defmacro protect (&body body)
   `(unwind-protect (progn ,@(butlast body)) ,(car (last body))))
@@ -27,10 +41,70 @@
 
 (test connect-sanity
   (with-test-connection
-      (is (not (null *database*)))))
+    (is (not (null *database*)))))
 
-(test employee-table
-  "Build employee table"
+(defun build-null-test-table ()
+  "Building a simple table just to test the implementation can return :null. ABCL I am looking at you."
+  (with-test-connection
+    (query (:drop-table :if-exists 'null-test :cascade))
+    (query (:create-table 'null-test ((id :type serial :primary-key t :unique)
+                                      (nullable :type (or integer db-null)))))
+    (query (:insert-into 'null-test :set 'id 1 'nullable 10))
+    (query (:insert-into 'null-test :set 'id 2))
+    (query (:insert-into 'null-test :set 'id 3))))
+
+(test abcl-null
+  (build-null-test-table)
+  (with-test-connection
+    (is (equal (query (:select 'nullable :from 'null-test :where (:= 'id 1)) :single)
+               10))
+    (is (equal (query (:select 'nullable :from 'null-test :where (:= 'id 2)) :single)
+               :null))
+    (is (equal (query (:select '* :from 'null-test :where (:= 'id 2)))
+        '((2 :null))))))
+
+(defun build-recipe-tables ()
+  "Build recipe tables uses in array tests"
+  (with-test-connection
+    (query (:drop-table :if-exists 'recipes :cascade))
+    (query (:drop-table :if-exists 'recipe-tags-array :cascade))
+    (query (:create-table recipes
+                          ((recipe-id :type serial :constraint 'recipekey-id
+                                      :primary-key 't :unique)
+                           (name :type text)
+                           (text :type text))))
+
+    (query (:create-table recipe-tags-array ((recipe-id :type integer :references ((recipes recipe-id)))
+                                              (tags :type text[] :default "{}"))))
+
+    (query (:create-unique-index 'recipe-tags-id-recipe-id :on "recipe-tags-array"  :fields 'recipe-id))
+    (query (:create-index 'recipe-tags-id-tags :on "recipe-tags-array" :using gin :fields 'tags))
+
+    (loop for x in '(("Fattoush" #("greens" "pita bread" "olive oil" "garlic"
+                                   "lemon" "salt" "spices"))
+                     ("Shawarma" #("meat" "tahini sauce" "pita bread"))
+                     ("Baba Ghanoush" #("pita bread" "olive oil" "eggplant" "tahini sauce"))
+                     ("Shish Taouk" #("chicken" "lemon juice" "garlic" "paprika"
+                                      "yogurt" "tomato paste" "pita bread"))
+                     ("Kibbe nayeh" #("raw meat" "bulgur" "onion" "spices" "pita bread"))
+                     ("Manakeesh" #("meat" "cheese" "zaatar" "kishik" "tomatoes"
+                                    "cucumbers" "mint leaves" "olives"))
+                     ("Fakafek" #("chickpeas" "pita bread" "tahini sauce"))
+                     ("Tabbouleh" #("bulgur" "tomatoes" "onions" "parsley"))
+                     ("Kofta" #("minced meat" "parsley" "spices" "onions"))
+                     ("Kunafeh" #("cheese" "sugar syrup" "pistachios"))
+                     ("Baklava" #("filo dough" "honey" "nuts"))) do
+         (query (:insert-into 'recipes :set 'name (first x) 'text (format nil "~a" (rest x))))
+         (query
+          (:insert-into 'recipe-tags-array
+                        :set 'recipe-id
+                        (:select 'recipe-id
+                                 :from 'recipes
+                                 :where (:= 'recipes.name (first x)))
+                        'tags (second x))))))
+
+(defun build-employee-table ()
+  "Build employee table for test purposes"
   (setf cl-postgres:*sql-readtable*
         (cl-postgres:copy-sql-readtable
          cl-postgres::*default-sql-readtable*))
@@ -54,8 +128,12 @@
                                         (6 "James" 70060 "09/06/99" "Toronto" "N" 26)
                                         (7 "Alison" 90620 "08/07/00" "New York" "W" 38)
                                         (8 "Chris" 26020 "07/08/01" "Vancouver" "N" 22)
-                                        (9 "Mary" 60020 "06/08/02" "Toronto" "W" 34))))
-    (is-true (table-exists-p 'employee))))
+                                        (9 "Mary" 60020 "06/08/02" "Toronto" "W" 34))))))
+
+(test employee-table
+  (with-test-connection
+    (build-employee-table)
+  (is-true (table-exists-p 'employee))))
 
 (test sql-error)
 
@@ -156,7 +234,9 @@ escape-p is :auto and the name contains reserved words."
   (is (equal (s-sql::to-sql-name "George-Harrison" :literal)
              "\"George-Harrison\""))
   (is (equal (s-sql:to-sql-name "george-gracie!@~#$%^&*()_+=-0987654321`QWERTGFDSAZXCVBNM<>?:LKJHYIUOP{}|/.,mnhjkl;']\[poiuy")
-             "george_gracie________*______0987654321_qwertgfdsazxcvbnm____lkjhyiuop____._mnhjkl____poiuy")))
+             "george_gracie________*______0987654321_qwertgfdsazxcvbnm____lkjhyiuop____._mnhjkl____poiuy"))
+  (is (equal (s-sql:to-sql-name "Seyðisfjörður")  ;checking unicode names
+             "seyðisfjörður")))
 
 (test from-sql-name
   "Testing from-sql-name. Convert a string to something that might have been its original
@@ -165,84 +245,110 @@ characters other than #\-)"
   (is (equal (s-sql::from-sql-name "create_all")
              :CREATE-ALL))
   (is (equal (s-sql::from-sql-name "region/los_angeles")
-             :REGION/LOS-ANGELES)))
+             :REGION/LOS-ANGELES))
+  (is (equal (from-sql-name "Seyðisfjörður") ;checking unicode names
+             :SEYÐISFJÖRÐUR))
+  (is (equal (let ((name "create_all")) (s-sql::from-sql-name name))
+             :CREATE-ALL))
+  (is (equal (let ((name 'create_all)) (s-sql::from-sql-name name))
+             :CREATE-ALL)))
 
 (test sql-type-name
-      "Testing sql-type-name. Transform a lisp type into a string containing
+  "Testing sql-type-name. Transform a lisp type into a string containing
 something SQL understands. Default is to just use the type symbol's
 name."
-      (is (equal (sql-type-name 'string "5")
-                 "CHAR(5)"))
-      (is (equal (sql-type-name 'string)
-                 "TEXT"))
-      (is (equal (sql-type-name 'double-float)
-                 "DOUBLE PRECISION"))
-      (is (equal (sql-type-name 'ratio)
-                 "RATIO"))
-      (is (equal (sql-type-name 'float)
-                 "REAL"))
-      (signals error (sql-type-name 'array))
-      (is (equal (sql-type-name 'array 'integer)
-                 "INTEGER[]"))
-      (signals error (sql-type-name 'array "boulder")))
+  (is (equal (sql-type-name 'string "5")
+             "CHAR(5)"))
+  (is (equal (let ((name 'string)) (sql-type-name name "5"))
+             "CHAR(5)"))
+  (is (equal (sql-type-name 'string)
+             "TEXT"))
+  (is (equal (sql-type-name 'double-float)
+             "DOUBLE PRECISION"))
+  (is (equal (sql-type-name 'ratio)
+             "RATIO"))
+  (is (equal (sql-type-name 'float)
+             "REAL"))
+  (signals error (sql-type-name 'array))
+  (is (equal (sql-type-name 'array 'integer)
+             "INTEGER[]"))
+  (signals error (sql-type-name 'array "boulder")))
 
 (test to-type-name
   "Testing to-type-name. Turn a Lisp type expression into an SQL typename."
   (is (equal (s-sql::to-type-name 'float)
              "REAL"))
   (is (equal (s-sql::to-type-name '(string "5"))
-             "CHAR(5)")))
+             "CHAR(5)"))
+  (is (equal (let ((name 'float)) (s-sql::to-type-name name))
+             "REAL"))
+  (signals error (let ((name "float")) (s-sql::to-type-name name))))
 
 (test s-sql:sql-escape-string
   "Testing sql-escape-string. Escape string data so it can be used in a query."
-    (is (equal (sql-escape-string "Puss in 'Boots'")
-               "E'Puss in ''Boots'''")))
+  (is (equal (sql-escape-string "Puss in 'Boots'")
+             "E'Puss in ''Boots'''"))
+  (is (equal (let ((name "float")) (sql-escape-string name))
+             "E'float'"))
+  (signals error (let ((name 'float)) (sql-escape-string name))))
 
 (test sql-escape
   "Testing sql-escape. Get the representation of a Lisp value so that it
 can be used in a query."
-    (is (equal (sql-escape (/ 1 13))
-               "0.0769230769230769230769230769230769230"))
-    (is (equal (sql-escape #("Baden-Wurttemberg" "Bavaria" "Berlin" "Brandenburg"))
-               "ARRAY[E'Baden-Wurttemberg', E'Bavaria', E'Berlin', E'Brandenburg']")))
+  (is (equal (sql-escape "tr'-x")
+             "E'tr''-x'"))
+  (is (equal (sql-escape (/ 1 13))
+             "0.0769230769230769230769230769230769230"))
+  (is (equal (sql-escape #("Baden-Wurttemberg" "Bavaria" "Berlin" "Brandenburg"))
+             "ARRAY[E'Baden-Wurttemberg', E'Bavaria', E'Berlin', E'Brandenburg']"))
+  (is (equal (let ((name 'float)) (sql-escape name))
+             "float")))
 
 (test sql-expand
   "Testing sql-expand. Compile-time expansion of forms into lists of stuff that evaluates
 to strings \(which will form an SQL query when concatenated)."
-    (is (equal (s-sql::sql-expand (/ 1 13))
-               '("0.0769230769230769230769230769230769230")))
-    (is (equal (s-sql::sql-expand '("george" "paul" "john" "ringo"))
-               '((SQL-ESCAPE ("george" "paul" "john" "ringo")))))
-    (is (equal (s-sql::sql-expand '(george "paul"))
-               '((SQL-ESCAPE (GEORGE "paul")))))
-    (is (equal (s-sql::sql-expand '(:george  "paul" "Beatles"))
-               '("george" "(" "E'paul'" ", " "E'Beatles'" ")")))
-    (is (equal (s-sql::sql-expand '(:george  "rhythm" :group "Beatles"))
-               '("george" "(" "E'rhythm'" ", " "\"group\"" ", " "E'Beatles'" ")")))
-    (is (equal (s-sql::sql-expand '(george  "rhythm" :group "Beatles"))
-               '((SQL-ESCAPE (GEORGE "rhythm" :GROUP "Beatles")))))
-    (is (equal (s-sql::sql-expand '(:= 'facs.facid 1))
-               '("(" "facs.facid" " = " "1" ")"))))
+  (is (equal (s-sql::sql-expand (/ 1 13))
+             '("0.0769230769230769230769230769230769230")))
+  (is (equal (s-sql::sql-expand '("george" "paul" "john" "ringo"))
+             '((SQL-ESCAPE ("george" "paul" "john" "ringo")))))
+  (is (equal (s-sql::sql-expand '(george "paul"))
+             '((SQL-ESCAPE (GEORGE "paul")))))
+  (is (equal (s-sql::sql-expand '(:george  "paul" "Beatles"))
+             '("george" "(" "E'paul'" ", " "E'Beatles'" ")")))
+  (is (equal (s-sql::sql-expand '(:george  "rhythm" :group "Beatles"))
+             '("george" "(" "E'rhythm'" ", " "\"group\"" ", " "E'Beatles'" ")")))
+  (is (equal (s-sql::sql-expand '(george  "rhythm" :group "Beatles"))
+             '((SQL-ESCAPE (GEORGE "rhythm" :GROUP "Beatles")))))
+  (is (equal (s-sql::sql-expand '(:= 'facs.facid 1))
+             '("(" "facs.facid" " = " "1" ")"))))
 
 (test sql-expand-list
   "Testing sql-expand-list. Expand a list of elements, adding a separator in between them."
-    (is (equal (s-sql::sql-expand-list '(george paul john "ringo" "mary-ann" carol-anne))
-               '((SQL-ESCAPE GEORGE) ", " (SQL-ESCAPE PAUL) ", " (SQL-ESCAPE JOHN) ", "
-                 "E'ringo'" ", " "E'mary-ann'" ", " (SQL-ESCAPE CAROL-ANNE))))
-    (is (equal (s-sql::sql-expand-list '((:desc 'today) 'tomorrow 'yesterday))
-               '("today" " DESC" ", " "tomorrow" ", " "yesterday")))
-    (is (equal (s-sql::sql-expand-list (remove nil '(george paul john "ringo" "mary-ann" nil carol-anne nil)))
-               '((SQL-ESCAPE GEORGE) ", " (SQL-ESCAPE PAUL) ", " (SQL-ESCAPE JOHN) ", "
-                "E'ringo'" ", " "E'mary-ann'" ", " (SQL-ESCAPE CAROL-ANNE)))))
+  (is (equal (s-sql::sql-expand-list '(george paul john "ringo" "mary-ann" carol-anne))
+             '((SQL-ESCAPE GEORGE) ", " (SQL-ESCAPE PAUL) ", " (SQL-ESCAPE JOHN) ", "
+               "E'ringo'" ", " "E'mary-ann'" ", " (SQL-ESCAPE CAROL-ANNE))))
+  (is (equal (s-sql::sql-expand-list '((:desc 'today) 'tomorrow 'yesterday))
+             '("today" " DESC" ", " "tomorrow" ", " "yesterday")))
+  (is (equal (s-sql::sql-expand-list (remove nil '(george paul john "ringo" "mary-ann" nil carol-anne nil)))
+             '((SQL-ESCAPE GEORGE) ", " (SQL-ESCAPE PAUL) ", " (SQL-ESCAPE JOHN) ", "
+               "E'ringo'" ", " "E'mary-ann'" ", " (SQL-ESCAPE CAROL-ANNE)))))
 
 (test sql-expand-names
   "Testing sql-expand-names"
-    (is (equal (s-sql::sql-expand-names '("george" "paul" "john" "ringo" "mary-ann"))
-               '("george" ", " "paul" ", " "john" ", " "ringo" ", " "mary_ann")))
-    (is (equal (s-sql::sql-expand-names '((george. "paul") "john" "ringo" "mary-ann"))
-               '("george." "(" "E'paul'" ")" ", " "john" ", " "ringo" ", " "mary_ann")))
-    (is (equal (s-sql::sql-expand-names '((george  "paul") "john" "ringo" "mary-ann"))
-               '("george" "(" "E'paul'" ")" ", " "john" ", " "ringo" ", " "mary_ann"))))
+  (is (equal (let ((name 'float)) (s-sql::sql-expand-names name))
+             NIL))
+  (is (equal (let ((name "float")) (s-sql::sql-expand-names name))
+             NIL))
+  (is (equal (let ((name '("float"))) (s-sql::sql-expand-names name))
+             '("float")))
+  (is (equal (let ((name '('float))) (s-sql::sql-expand-names name))
+             '("float")))
+  (is (equal (s-sql::sql-expand-names '("george" "paul" "john" "ringo" "mary-ann"))
+             '("george" ", " "paul" ", " "john" ", " "ringo" ", " "mary_ann")))
+  (is (equal (s-sql::sql-expand-names '((george. "paul") "john" "ringo" "mary-ann"))
+             '("george." "(" "E'paul'" ")" ", " "john" ", " "ringo" ", " "mary_ann")))
+  (is (equal (s-sql::sql-expand-names '((george  "paul") "john" "ringo" "mary-ann"))
+             '("george" "(" "E'paul'" ")" ", " "john" ", " "ringo" ", " "mary_ann"))))
 
 (test reduce-strings
   "Testing reduce-strings. Join adjacent strings in a list, leave other values intact."
@@ -254,7 +360,9 @@ to strings \(which will form an SQL query when concatenated)."
 (test sql-macro
   "Testing sql-macro. Compile form to an sql expression as far as possible."
     (is (equal (sql (:select 'name :from 'items :where (:= 'id 1)))
-               "(SELECT name FROM items WHERE (id = 1))")))
+               "(SELECT name FROM items WHERE (id = 1))"))
+  (is (equal (sql (:select "name" :from 'items :where (:= 'id 1))) ;note that Postgresql will error on the escaped columns
+             "(SELECT E'name' FROM items WHERE (id = 1))")))
 
 (test sql-compile
   "Testing sql-compile"
@@ -350,10 +458,20 @@ to strings \(which will form an SQL query when concatenated)."
              "(SELECT E'2018-01-01'::DATE)"))
   (is (equal (sql (:select (:type "1 minute" interval)))
              "(SELECT E'1 minute'::INTERVAL)"))
-  (is (equal (sql (:select (:as (:cast (:as (:* 50 (:random)) 'int)) 'x) :from (:generate-series 1 3)))
+  (is (equal (sql (:select (:as (:cast (:as (:* 50 (:random)) 'int)) 'x)
+                   :from (:generate-series 1 3)))
              "(SELECT CAST((50 * random()) AS int) AS x FROM generate_series(1, 3))"))
-  (is (equal (sql (:select (:as (:- (:type (:now) date) 'x) 'some-date) :from (:as (:generate-series 1 10) 'x)))
-             "(SELECT (now()::DATE - x) AS some_date FROM generate_series(1, 10) AS x)")))
+  (is (equal (sql (:select (:as (:- (:type (:now) date) 'x) 'some-date)
+                   :from (:as (:generate-series 1 10) 'x)))
+             "(SELECT (now()::DATE - x) AS some_date FROM generate_series(1, 10) AS x)"))
+  (is (equal (with-test-connection
+               (let ((type 'text))(query (:select (:cast (:as "20" type)))
+                                         :single)))
+             "20"))
+  (is (equal (with-test-connection
+               (let ((type 'integer))(query (:select (:cast (:as "20" type)))
+                                         :single)))
+             20)))
 
 (test values
   "Testing values. Escaped string results have been validated."
@@ -366,6 +484,10 @@ to strings \(which will form an SQL query when concatenated)."
 
   (is (equal (sql (:select '* :from (:as (:values (:set 1 "one") (:set 2 "two") (:set 3 "three")) (:t1 'num 'letter))))
              "(SELECT * FROM (VALUES (1, E'one'), (2, E'two'), (3, E'three')) AS t1(num, letter))")))
+
+(test select-limit-offset
+      (is (equal (sql (:limit (:select 'country :from 'un-m49) 5 10))
+                 "((SELECT country FROM un_m49) LIMIT 5 OFFSET 10)")))
 
 (test select-distinct
       "Testing select with distinct. From https://www.pgexercises.com/questions/basic/unique.html"
@@ -380,6 +502,12 @@ SELECT DISTINCT ON ( expression [, ...] ) keeps only the first row of each set o
                                           :from 'weather-reports)
                                  'location  (:desc 'time)))
                  "((SELECT DISTINCT ON (location) location, time, report FROM weather_reports) ORDER BY location, time DESC)")))
+
+(test select-fetch
+  "Testing the fetch sql-op"
+  (is (equal
+       (sql (:fetch (:order-by (:select 'id :from 'historical-events) 'id) 5))
+       "(((SELECT id FROM historical_events) ORDER BY id) FETCH FIRST 5 ROWS ONLY)")))
 
 (test select-join-1
       "Testing basic join. Note full use of as. https://www.postgresql.org/docs/current/static/sql-select.html
@@ -715,7 +843,8 @@ To sum the column len of all films and group the results by kind:"
                                              (:select :null :null (:as (:sum 'slots) 'slots)
                                                       :from 'cd.bookings
                                                       :where (:and (:>= 'starttime "2012-01-01")
-                                                                   (:< 'starttime "2013-01-01")))) 'facid 'month))
+                                                                   (:< 'starttime "2013-01-01"))))
+                                 'facid 'month))
                  "(((SELECT facid, EXTRACT(month FROM starttime) AS month, SUM(slots) AS slots FROM cd.bookings WHERE ((starttime >= E'2012-01-01') and (starttime < E'2013-01-01')) GROUP BY facid, month) union all (SELECT facid, NULL, SUM(slots) AS slots FROM cd.bookings WHERE ((starttime >= E'2012-01-01') and (starttime < E'2013-01-01')) GROUP BY facid) union all (SELECT NULL, NULL, SUM(slots) AS slots FROM cd.bookings WHERE ((starttime >= E'2012-01-01') and (starttime < E'2013-01-01')))) ORDER BY facid, month)")))
 
 (test max-aggregation
@@ -735,34 +864,33 @@ To sum the column len of all films and group the results by kind:"
 
 (test every-aggregation-test
   "Testing the aggregation sql-op every. True if all input values are true, otherwise false."
-  (is (equal (with-test-connection
-               (query (:order-by (:select 'id 'name 'city 'salary (:every (:like 'name "J%"))
-                                :from 'employee
-                                :group-by 'name 'id 'salary 'city)
-                                 'name)))
-             '((7 "Alison" "New York" 90620 NIL) (3 "Celia" "Toronto" 24020 NIL)
-               (8 "Chris" "Vancouver" 26020 NIL) (5 "David" "Vancouver" 80026 NIL)
-               (6 "James" "Toronto" 70060 T) (1 "Jason" "New York" 40420 T)
-               (4 "Linda" "New York" 40620 NIL) (9 "Mary" "Toronto" 60020 NIL)
-               (2 "Robert" "Vancouver" 14420 NIL))))
-  (is (equal (with-test-connection
-               (query (:select 'id 'name 'city 'salary (:over (:every (:like 'name "J%"))
-                                                              (:partition-by 'id))
-                               :from 'employee )))
-             '((1 "Jason" "New York" 40420 T) (2 "Robert" "Vancouver" 14420 NIL)
-              (3 "Celia" "Toronto" 24020 NIL) (4 "Linda" "New York" 40620 NIL)
-              (5 "David" "Vancouver" 80026 NIL) (6 "James" "Toronto" 70060 T)
-              (7 "Alison" "New York" 90620 NIL) (8 "Chris" "Vancouver" 26020 NIL)
-               (9 "Mary" "Toronto" 60020 NIL))))
-  (is (equal (with-test-connection
-               (query (:select 'id 'name 'city 'salary (:over (:every (:ilike 'name "j%"))
-                                                              (:partition-by 'id))
-                               :from 'employee )))
+  (with-test-connection
+    (unless (table-exists-p 'employee) (build-employee-table))
+    (is (equal (query (:order-by (:select 'id 'name 'city 'salary (:every (:like 'name "J%"))
+                                          :from 'employee
+                                          :group-by 'name 'id 'salary 'city)
+                                 'name))
+        '((7 "Alison" "New York" 90620 NIL) (3 "Celia" "Toronto" 24020 NIL)
+          (8 "Chris" "Vancouver" 26020 NIL) (5 "David" "Vancouver" 80026 NIL)
+          (6 "James" "Toronto" 70060 T) (1 "Jason" "New York" 40420 T)
+          (4 "Linda" "New York" 40620 NIL) (9 "Mary" "Toronto" 60020 NIL)
+          (2 "Robert" "Vancouver" 14420 NIL))))
+  (is (equal (query (:select 'id 'name 'city 'salary (:over (:every (:like 'name "J%"))
+                                                            (:partition-by 'id))
+                             :from 'employee ))
              '((1 "Jason" "New York" 40420 T) (2 "Robert" "Vancouver" 14420 NIL)
                (3 "Celia" "Toronto" 24020 NIL) (4 "Linda" "New York" 40620 NIL)
                (5 "David" "Vancouver" 80026 NIL) (6 "James" "Toronto" 70060 T)
                (7 "Alison" "New York" 90620 NIL) (8 "Chris" "Vancouver" 26020 NIL)
-               (9 "Mary" "Toronto" 60020 NIL)))))
+               (9 "Mary" "Toronto" 60020 NIL))))
+  (is (equal (query (:select 'id 'name 'city 'salary (:over (:every (:ilike 'name "j%"))
+                                                            (:partition-by 'id))
+                             :from 'employee ))
+             '((1 "Jason" "New York" 40420 T) (2 "Robert" "Vancouver" 14420 NIL)
+               (3 "Celia" "Toronto" 24020 NIL) (4 "Linda" "New York" 40620 NIL)
+               (5 "David" "Vancouver" 80026 NIL) (6 "James" "Toronto" 70060 T)
+               (7 "Alison" "New York" 90620 NIL) (8 "Chris" "Vancouver" 26020 NIL)
+               (9 "Mary" "Toronto" 60020 NIL))))))
 
 (test grouping-sets-selects
   "Testing grouping sets in a select clause. Reminder requires postgresql 9.5 or later."
@@ -796,15 +924,17 @@ To sum the column len of all films and group the results by kind:"
 
 (test string-agg
   "Testing string-agg sql-op"
-  (is (equal (sql (:select (:as (:string-agg 'bp.step-type "," ) 'step-summary) :from 'business-process))
-             "(SELECT STRING_AGG(bp.step_type, E',') AS step_summary FROM business_process)"))
-  (is (equal (sql (:select 'mid (:as (:string-agg  'y "," :distinct) 'words) :from 'moves))
-             "(SELECT mid, STRING_AGG(DISTINCT y, E',') AS words FROM moves)"))
-  (is (equal (sql (:select 'mid (:as (:string-agg  'y "," :distinct :order-by (:desc 'y) ) 'words) :from 'moves))
-             "(SELECT mid, STRING_AGG(DISTINCT y, E',' ORDER BY y DESC) AS words FROM moves)"))
-  (is (equal (with-test-connection
-               (query (:select (:string-agg  'name "," :order-by (:desc 'name) :filter (:< 'id 4)) :from 'employee)))
-             '(("Robert,Jason,Celia")))))
+  (with-test-connection
+    (is (equal (sql (:select (:as (:string-agg 'bp.step-type "," ) 'step-summary) :from 'business-process))
+               "(SELECT STRING_AGG(bp.step_type, E',') AS step_summary FROM business_process)"))
+    (is (equal (sql (:select 'mid (:as (:string-agg  'y "," :distinct) 'words) :from 'moves))
+               "(SELECT mid, STRING_AGG(DISTINCT y, E',') AS words FROM moves)"))
+    (is (equal (sql (:select 'mid (:as (:string-agg  'y "," :distinct :order-by (:desc 'y) ) 'words) :from 'moves))
+               "(SELECT mid, STRING_AGG(DISTINCT y, E',' ORDER BY y DESC) AS words FROM moves)"))
+    (unless (table-exists-p 'employee) (build-employee-table))
+    (is (equal
+         (query (:select (:string-agg  'name "," :order-by (:desc 'name) :filter (:< 'id 4)) :from 'employee))
+        '(("Robert,Jason,Celia"))))))
 
 (test percentile-cont
   "Testing percentile-cont."
@@ -850,6 +980,7 @@ To sum the column len of all films and group the results by kind:"
 (test stddev1
   "Testing statistical functions 1"
   (with-test-connection
+    (unless (table-exists-p 'employee) (build-employee-table))
         (is (equal (format nil "~,6f" (query (:select (:stddev 'salary) :from 'employee) :single))
                    "26805.934000"))
         (is (equal (query (:select (:variance 'salary) :from 'employee) :single)
@@ -872,7 +1003,7 @@ To sum the column len of all films and group the results by kind:"
 (test regr-functions
   "Testing standard deviation functions"
   (with-test-connection
-
+    (unless (table-exists-p 'employee) (build-employee-table))
     (is (equal (query (:select (:regr-avgx 'salary 'age) :from 'employee) :single)
                28.11111111111111d0))
     (is (equal (query (:select (:regr-avgx 'age 'salary) :from 'employee) :single)
@@ -885,30 +1016,30 @@ To sum the column len of all films and group the results by kind:"
                9))
     (is (equal (query (:select (:regr-count 'age 'salary) :from 'employee) :single)
                9))
-    (is (equal (query (:select (:regr-intercept 'salary 'age) :from 'employee) :single)
-               -62911.0363153233d0))
+    (is (equal (round (query (:select (:regr-intercept 'salary 'age) :from 'employee) :single))
+               (round -62911.0363153233d0)))  ;; using round because postgresql 12 generates a slightly different number than postgresql 11
     (is (equal (query (:select (:regr-intercept 'age 'salary) :from 'employee) :single)
                19.451778623108986d0))
     (is (equal (query (:select (:regr-r2 'salary 'age) :from 'employee) :single)
                0.6988991834467292d0))
     (is (equal (query (:select (:regr-r2 'age 'salary) :from 'employee) :single)
                0.6988991834467292d0))
-    (is (equal (query (:select (:regr-slope 'salary 'age) :from 'employee) :single)
-               4001.6811337466784d0))
-    (is (equal (query (:select (:regr-slope 'age 'salary) :from 'employee) :single)
-               1.7465139277410806d-4))
-    (is (equal (query (:select (:regr-sxx 'salary 'age) :from 'employee) :single)
-               250.88888888888889d0))
+    (is (equal (round (query (:select (:regr-slope 'salary 'age) :from 'employee) :single))
+               (round 4001.6811337466784d0)))  ;;  using round because postgresql 12 generates a slightly different number than postgresql 11
+    (is (equal (round (query (:select (:regr-slope 'age 'salary) :from 'employee) :single))
+               (round 1.7465139277410806d-4))) ;;  using round because postgresql 12 generates a slightly different number than postgresql 11
+    (is (equal (round (query (:select (:regr-sxx 'salary 'age) :from 'employee) :single))
+               (round 250.88888888888889d0)))  ;;  using round because postgresql 12 generates a slightly different number than postgresql 11
     (is (equal (query (:select (:regr-sxx 'age 'salary) :from 'employee) :single)
                5.748464512d9))
-    (is (equal (query (:select (:regr-sxy 'salary 'age) :from 'employee) :single)
-               1003977.3333333334d0))
-    (is (equal (query (:select (:regr-sxy 'age 'salary) :from 'employee) :single)
-               1003977.3333333334d0))
+    (is (equal (round (query (:select (:regr-sxy 'salary 'age) :from 'employee) :single))
+               (round 1003977.3333333334d0))) ;;  using round because postgresql 12 generates a slightly different number than postgresql 11
+    (is (equal (round (query (:select (:regr-sxy 'age 'salary) :from 'employee) :single))
+               (round 1003977.3333333334d0)))  ;;  using round because postgresql 12 generates a slightly different number than postgresql 11
     (is (equal (query (:select (:regr-syy 'salary 'age) :from 'employee) :single)
                5.748464512d9))
-    (is (equal (query (:select (:regr-syy 'age 'salary) :from 'employee) :single)
-               250.88888888888889d0))))
+    (is (equal (round (query (:select (:regr-syy 'age 'salary) :from 'employee) :single))
+               (round 250.88888888888889d0))))) ;;  using round because postgresql 12 generates a slightly different number than postgresql 11
 
 (test select-union
       "testing basic union."
@@ -1174,51 +1305,309 @@ To sum the column len of all films and group the results by kind:"
 
 (test insert-into
       "Testing insert into"
-      (is (equal (sql (:insert-into 'cd.facilities :set 'facid 9 'name "Spa" 'membercost 20 'guestcost 30
-                                    'initialoutlay 100000 'monthlymaintenance 800))
+      (is (equal (sql (:insert-into 'cd.facilities
+                       :set 'facid 9 'name "Spa" 'membercost 20 'guestcost 30
+                       'initialoutlay 100000 'monthlymaintenance 800))
                  "INSERT INTO cd.facilities (facid, name, membercost, guestcost, initialoutlay, monthlymaintenance)  VALUES (9, E'Spa', 20, 30, 100000, 800)"))
 
 ;; Testing with a calculation in the value
-      (is (equal (sql (:insert-into 'test :set 'id 15 'number-string "12" 'numeric-item 12.45
-                                'ratio-item (/ 1 13) 'created-at "2018-02-01"))
+      (is (equal (sql (:insert-into 'test
+                       :set 'id 15 'number-string "12" 'numeric-item 12.45
+                       'ratio-item (/ 1 13) 'created-at "2018-02-01"))
                  "INSERT INTO test (id, number_string, numeric_item, ratio_item, created_at)  VALUES (15, E'12', 12.45, 0.0769230769230769230769230769230769230, E'2018-02-01')"))
 
-;; Testing overriding-user-value
-      (is (equal (sql (:insert-into 'employee :set 'id 1 'name "Paul"  :overriding-user-value :on-conflict-do-nothing))
-                 "INSERT INTO employee (id, name)  OVERRIDING USER VALUE  VALUES (1, E'Paul') ON CONFLICT DO NOTHING"))
-;; Testing overriding system-value
-      (is (equal (sql (:insert-into 'employee :set 'id 1 'name "Paul"  :overriding-system-value :on-conflict-do-nothing))
-                 "INSERT INTO employee (id, name)  OVERRIDING SYSTEM VALUE  VALUES (1, E'Paul') ON CONFLICT DO NOTHING"))
-      ;;    Testing On Conflict
-      (is (equal (sql (:insert-into 'test-table :set 'column-A '$1 'column-B '$2
-                     :on-conflict-update 'column-A
-                     :update-set 'column-B '$2
-                     :where (:= 'test-table.column-A '$1)))
-                 "INSERT INTO test_table (column_a, column_b)  VALUES ($1, $2) ON CONFLICT (column_a) DO UPDATE SET column_b = $2 WHERE (test_table.column_a = $1)"))
-
+      ;; Testing select
+      (is (equal (sql (:insert-into 'users
+                       (:select (:uuid-generate-v4) "Lucie"
+                                "Hawkins""Lucie-Jones@gmail.com")))
+                 "INSERT INTO users (SELECT uuid_generate_v4(), E'Lucie', E'Hawkins', E'Lucie-Jones@gmail.com')"))
+      (is (equal (sql (:insert-into 't6 (:select 'id :from 't5)))
+                 "INSERT INTO t6 (SELECT id FROM t5)"))
 ;; Testing select in insert statement
 ;; From https://www.pgexercises.com/questions/updates/insert3.html
       (is (equal (sql (:insert-into 'cd.facilities
-                                    :set 'facid (:select (:+ (:select (:max 'facid) :from 'cd.facilities) 1))
-                                         'name "Spa" 'membercost 20 'guestcost 30 'initialoutlay 100000 'monthlymaintenance 800))
+                       :set 'facid
+                       (:select (:+ (:select (:max 'facid)
+                                     :from 'cd.facilities)
+                                    1))
+                       'name "Spa" 'membercost 20 'guestcost 30
+                       'initialoutlay 100000 'monthlymaintenance 800))
                  "INSERT INTO cd.facilities (facid, name, membercost, guestcost, initialoutlay, monthlymaintenance)  VALUES ((SELECT ((SELECT MAX(facid) FROM cd.facilities) + 1)), E'Spa', 20, 30, 100000, 800)"))
+;; Testing overriding-user-value
+      (is (equal (sql (:insert-into 'employee
+                       :set 'id 1 'name "Paul"
+                       :overriding-user-value
+                       :on-conflict-do-nothing))
+                 "INSERT INTO employee (id, name)  OVERRIDING USER VALUE  VALUES (1, E'Paul') ON CONFLICT DO NOTHING"))
+      ;; Testing overriding system-value
+      (is (equal (sql (:insert-into 'employee
+                       :set 'id 1 'name "Paul"
+                       :overriding-system-value
+                       :on-conflict-do-nothing))
+                 "INSERT INTO employee (id, name)  OVERRIDING SYSTEM VALUE  VALUES (1, E'Paul') ON CONFLICT DO NOTHING")))
 
+(test insert-into-on-conflict-do-nothing
+  (is (equal (sql (:insert-into 'distributors
+                   :set 'did 7 'dname "Readline GmbH"
+                   :on-conflict-do-nothing))
+             "INSERT INTO distributors (did, dname)  VALUES (7, E'Readline GmbH') ON CONFLICT DO NOTHING"))
+  ;; basic :on-conflict with separate :do-nothing keyword
+  (is (equal (sql (:insert-into 'test
+                   :set 'some-col "a" 'some-val 5
+                   :on-conflict 'some-col
+                   :do-nothing))
+             "INSERT INTO test (some_col, some_val)  VALUES (E'a', 5) ON CONFLICT (some_col) DO NOTHING "))
+  ;; with where condition
+  (is (equal (sql (:insert-into 'distributors
+                   :set 'did 10 'dname "Conrad International"
+                   :on-conflict 'did
+                   :do-nothing
+                   :where 'is-active))
+             "INSERT INTO distributors (did, dname)  VALUES (10, E'Conrad International') ON CONFLICT (did) WHERE is_active DO NOTHING "))
+  ;; With returning
+  (is (equal (sql (:insert-into 'distributors
+                   :set 'did 8 'dname "Readline GmbH"
+                   :on-conflict 'did 'dname
+                   :do-nothing
+                   :returning 'id))
+             "INSERT INTO distributors (did, dname)  VALUES (8, E'Readline GmbH') ON CONFLICT (did, dname) DO NOTHING  RETURNING id"))
+  ;; with where and returning
+  (is (equal (sql (:insert-into 'test-table
+                   :set 'column-A '$1 'column-B '$2
+                   :on-conflict 'column-A
+                   :do-nothing
+                   :where (:= 'test-table.column-A '$1)
+                   :returning '*))
+             "INSERT INTO test_table (column_a, column_b)  VALUES ($1, $2) ON CONFLICT (column_a) WHERE (test_table.column_a = $1) DO NOTHING  RETURNING *"))
+  ;; With on-conflict-on-constraint and do-nothing as a separate operator
+  (is (equal (sql (:insert-into 'distributors
+                   :set 'did 10 'dname "Readline GmbH"
+                   :on-conflict-on-constraint 'distributors-pkey
+                   :do-nothing
+                   :returning 'id))
+             "INSERT INTO distributors (did, dname)  VALUES (10, E'Readline GmbH') ON CONFLICT ON CONSTRAINT distributors_pkey DO NOTHING  RETURNING id"))
+  ;; basic :on-conflict with separate :do-nothing keyword and returning
+  (is (equal (sql (:insert-into 'test
+                   :set 'some-key "a" 'some-val 4
+                   :on-conflict 'some-key
+                   :do-nothing
+                   :returning '*))
+             "INSERT INTO test (some_key, some_val)  VALUES (E'a', 4) ON CONFLICT (some_key) DO NOTHING  RETURNING *")))
+
+(test insert-into-on-conflict-update
+  ;; Testing On Conflict update
+      (is (equal (sql (:insert-into 'test-table
+                       :set 'column-A '$1 'column-B '$2
+                       :on-conflict-update 'column-A
+                       :update-set 'column-B '$2
+                       :where (:= 'test-table.column-A '$1)))
+                 "INSERT INTO test_table (column_a, column_b)  VALUES ($1, $2) ON CONFLICT (column_a) DO UPDATE SET column_b = $2 WHERE (test_table.column_a = $1)"))
+        ;; basic version single row
+  (is (equal (sql (:insert-into 'users
+                   (:select (:uuid-generate-v4) "Lucie" "Hawkins" "Lucie-Jones@gmail.com")
+                   :on-conflict-update 'email
+                   :update-set 'first-name 'excluded.first-name 'last-name 'excluded.last-name))
+             "INSERT INTO users (SELECT uuid_generate_v4(), E'Lucie', E'Hawkins', E'Lucie-Jones@gmail.com') ON CONFLICT (email) DO UPDATE SET first_name = excluded.first_name, last_name = excluded.last_name"))
+  ;; Basic version multiple row and specified columns
+  (is (equal (sql (:insert-into 'distributors
+                   :set 'did 5 'dname "Gizmo Transglobal"
+                   :on-conflict-update 'did
+                   :update-set 'dname 'excluded.dname))
+             "INSERT INTO distributors (did, dname)  VALUES (5, E'Gizmo Transglobal') ON CONFLICT (did) DO UPDATE SET dname = excluded.dname"))
+  ;; with where clause
+  (is (equal (sql (:insert-into 'users
+                   (:select (:uuid-generate-v4) "Lucie" "Hawkins" "Lucie-Jones@gmail.com")
+                   :on-conflict-update 'email
+                   :update-set 'first-name 'excluded.first-name 'last-name 'excluded.last-name
+                   :where (:<> 'u.first-name "Lucie")))
+             "INSERT INTO users (SELECT uuid_generate_v4(), E'Lucie', E'Hawkins', E'Lucie-Jones@gmail.com') ON CONFLICT (email) DO UPDATE SET first_name = excluded.first_name, last_name = excluded.last_name WHERE (u.first_name <> E'Lucie')"))
+  ;; with concatenation function in the update-set clause
+  (is (equal (sql (:insert-into 'distributors
+                   :set 'did 8 'dname "Anvil Distribution"
+                   :on-conflict-update 'did
+                   :update-set 'dname (:|| 'excluded.dname  " (formerly " 'd.dname ")")
+                   :where (:<> 'd.zipcode "21201")))
+             "INSERT INTO distributors (did, dname)  VALUES (8, E'Anvil Distribution') ON CONFLICT (did) DO UPDATE SET dname = (excluded.dname || E' (formerly ' || d.dname || E')') WHERE (d.zipcode <> E'21201')"))
+  ;; with on-conflict-on-constraint
+  (is (equal (sql (:insert-into 'test
+                   :set 'some-key "a" 'some-val 5
+                   :on-conflict-on-constraint 'somekey
+                   :update-set 'some-val 'excluded.some-val))
+             "INSERT INTO test (some_key, some_val)  VALUES (E'a', 5) ON CONFLICT ON CONSTRAINT somekey DO UPDATE SET some_val = excluded.some_val"))
+  ;; with on-conflict-on-constraint and returning clause
+  (is (equal (sql (:insert-into 'test
+                   :set 'some-key "a" 'some-val 2
+                   :on-conflict-on-constraint 'somekey
+                   :update-set 'some-val 'excluded.some-val
+                   :returning '*))
+             "INSERT INTO test (some_key, some_val)  VALUES (E'a', 2) ON CONFLICT ON CONSTRAINT somekey DO UPDATE SET some_val = excluded.some_val RETURNING *"))
+;; on-conflict-on-constraint with addition function in the update-set clause
+  (is (equal (sql (:insert-into 'test
+                   :set 'some-key "a"
+                   :on-conflict-on-constraint 'somekey
+                   :update-set 'some-val (:+ 'test.some-val 1)))
+             "INSERT INTO test (some_key)  VALUES (E'a') ON CONFLICT ON CONSTRAINT somekey DO UPDATE SET some_val = (test.some_val + 1)"))
+  ;; with select clause which returns a single row
+  (is (equal (sql (:insert-into 'attendence
+                   :set 'event-id (:select 'id
+                               :from 'event
+                                   :where (:= (:lower 'event-dt) "2020-01-11 17:00:00"))
+                        'client-id 3 'attend-status "No Show"
+                   :on-conflict-on-constraint 'attendance-pkey
+                   :update-set 'attend-status 'excluded.attend_status))
+             "INSERT INTO attendence (event_id, client_id, attend_status)  VALUES ((SELECT id FROM event WHERE (lower(event_dt) = E'2020-01-11 17:00:00')), 3, E'No Show') ON CONFLICT ON CONSTRAINT attendance_pkey DO UPDATE SET attend_status = excluded.attend_status")))
+
+(test insert-rows-into
 ;; Testing basic inserting-rows-into
-      (is (equal (sql (:insert-rows-into 'my-table :values '((42 "foobar") (23 "foobaz"))))
-                 "INSERT INTO my_table VALUES (42, E'foobar'), (23, E'foobaz')"))
+  (is (equal (sql (:insert-rows-into 'my-table :values '((42 "foobar") (23 "foobaz"))))
+             "INSERT INTO my_table VALUES (42, E'foobar'), (23, E'foobaz')"))
+
 ;; Testing columns
 ;; From https://www.pgexercises.com/questions/updates/insert2.html
-      (is (equal (sql (:insert-rows-into 'cd.facilities
-                                         :columns 'facid 'name 'membercost 'guestcost 'initialoutlay 'monthlymaintenance
-                                         :values '((9 "Spa" 20 30 100000 800) (10 "Squash Court 2" 3.5 17.5 5000 80))))
-                 "INSERT INTO cd.facilities (facid, name, membercost, guestcost, initialoutlay, monthlymaintenance) VALUES (9, E'Spa', 20, 30, 100000, 800), (10, E'Squash Court 2', 3.5, 17.5, 5000, 80)"))
-
-;; Testing select in values in insert-rows-into
+  (is (equal (sql (:insert-rows-into 'cd.facilities
+                   :columns 'facid 'name 'membercost 'guestcost 'initialoutlay 'monthlymaintenance
+                   :values '((9 "Spa" 20 30 100000 800) (10 "Squash Court 2" 3.5 17.5 5000 80))))
+             "INSERT INTO cd.facilities (facid, name, membercost, guestcost, initialoutlay, monthlymaintenance) VALUES (9, E'Spa', 20, 30, 100000, 800), (10, E'Squash Court 2', 3.5, 17.5, 5000, 80)"))
+  ;; Testing select in values in insert-rows-into
+  (is (equal (sql (:insert-rows-into 't6
+                   :columns 'tags
+                   :values '(((:select 'id
+                               :from 't5)))))
+             "INSERT INTO t6 (tags) VALUES ((SELECT id FROM t5))"))
 ;; Now using rows https://www.pgexercises.com/questions/updates/insert3.html
-      (is (equal (sql (:insert-rows-into 'cd.facilities
-                         :columns 'facid  'name  'membercost  'guestcost 'initialoutlay 'monthlymaintenance
-                         :values '(((:select (:+ (:select (:max 'facid) :from 'cd.facilities) 1)) "Spa" 20 30 100000 800 ))))
-                 "INSERT INTO cd.facilities (facid, name, membercost, guestcost, initialoutlay, monthlymaintenance) VALUES ((SELECT ((SELECT MAX(facid) FROM cd.facilities) + 1)), E'Spa', 20, 30, 100000, 800)")))
+  (is (equal (sql (:insert-rows-into 'cd.facilities
+                   :columns 'facid  'name  'membercost  'guestcost 'initialoutlay 'monthlymaintenance
+                   :values '(((:select (:+ (:select (:max 'facid)
+                                            :from 'cd.facilities)
+                                        1))
+                              "Spa" 20 30 100000 800 ))))
+             "INSERT INTO cd.facilities (facid, name, membercost, guestcost, initialoutlay, monthlymaintenance) VALUES ((SELECT ((SELECT MAX(facid) FROM cd.facilities) + 1)), E'Spa', 20, 30, 100000, 800)"))
+  (is (equal (sql (:insert-rows-into 'table1
+                   :columns 'c1 'c2
+                   :overriding-system-value
+                   :values '((1 "a") (2 "b"))))
+             "INSERT INTO table1 (c1, c2)  OVERRIDING SYSTEM VALUE VALUES (1, E'a'), (2, E'b')")))
+
+(test insert-rows-into-on-conflict-do-nothing
+;; Testing inserting rows with on conflict do nothing
+  (is (equal (sql (:insert-rows-into 'distributors
+                   :columns 'did 'dname
+                   :values '((7 "Readline GmbH"))
+                   :on-conflict-do-nothing))
+             "INSERT INTO distributors (did, dname) VALUES (7, E'Readline GmbH') ON CONFLICT  DO NOTHING"))
+;; basic :on-conflict with separate :do-nothing keyword
+  (is (equal (sql (:insert-rows-into 'test :columns 'some-key 'some-val
+                   :values '(("a" 5) ("b" 6) ("c" 7))
+                   :on-conflict 'some-key
+                   :do-nothing))
+             "INSERT INTO test (some_key, some_val) VALUES (E'a', 5), (E'b', 6), (E'c', 7) ON CONFLICT (some_key) DO NOTHING "))
+  ;; With where condition
+  (is (equal (sql (:insert-rows-into 'distributors
+                   :columns 'did 'dname
+                   :values '((10 "Conrad International"))
+                   :on-conflict 'did
+                   :do-nothing
+                   :where 'is-active))
+             "INSERT INTO distributors (did, dname) VALUES (10, E'Conrad International') ON CONFLICT (did) WHERE is_active DO NOTHING "))
+;; With returning
+  (is (equal (sql (:insert-rows-into 'distributors :columns 'did 'dname
+                   :values '((8 "Readline GmbH"))
+                   :on-conflict 'did 'dname
+                   :do-nothing
+                   :returning 'id))
+             "INSERT INTO distributors (did, dname) VALUES (8, E'Readline GmbH') ON CONFLICT (did, dname) DO NOTHING  RETURNING id"))
+
+  ;; With on-conflict-on-constraint and do-nothing as a separate operator
+  (is (equal (sql (:insert-rows-into 'distributors :columns 'did 'dname
+                   :values '((10 "Readline GmbH"))
+                   :on-conflict-on-constraint 'distributors-pkey
+                   :do-nothing
+                   :returning 'id))
+             "INSERT INTO distributors (did, dname) VALUES (10, E'Readline GmbH') ON CONFLICT ON CONSTRAINT distributors_pkey DO NOTHING  RETURNING id"))
+  ;; basic :on-conflict with separate :do-nothing keyword and returning
+  (is (equal (sql (:insert-rows-into 'test :columns 'some-key 'some-val
+                   :values '(("a" 4) ("b" 6) ("c" 7))
+                   :on-conflict 'some-key
+                   :do-nothing
+                   :returning '*))
+             "INSERT INTO test (some_key, some_val) VALUES (E'a', 4), (E'b', 6), (E'c', 7) ON CONFLICT (some_key) DO NOTHING  RETURNING *"))
+  ;; multiple values basic :on-conflict-on-constraint with separate :do-nothing keyword and returning
+  (is (equal (sql (:insert-rows-into 'test :columns 'some-key 'some-val
+                   :values '(("a" 3) ("b" 6) ("c" 7))
+                   :on-conflict-on-constraint 'somekey
+                   :do-nothing
+                   :returning '*))
+             "INSERT INTO test (some_key, some_val) VALUES (E'a', 3), (E'b', 6), (E'c', 7) ON CONFLICT ON CONSTRAINT somekey DO NOTHING  RETURNING *")))
+
+(test insert-rows-into-on-conflict-update
+  ;; Testing inserting rows with on conflict update
+  ;; basic version single row
+  (is (equal (sql (:insert-rows-into 'users
+                   :values '(((:uuid-generate-v4) "Lucie" "Hawkins" "Lucie-Jones@gmail.com"))
+                   :on-conflict-update 'email
+                   :update-set 'first-name 'excluded.first-name 'last-name 'excluded.last-name))
+             "INSERT INTO users VALUES (uuid_generate_v4(), E'Lucie', E'Hawkins', E'Lucie-Jones@gmail.com') ON CONFLICT (email) DO UPDATE SET first_name = excluded.first_name, last_name = excluded.last_name"))
+  ;; Basic version multiple row and specified columns
+  (is (equal (sql (:insert-rows-into 'distributors
+                   :columns 'did 'dname
+                   :values '((5 "Gizmo Transglobal") (6 "Associated Computing Inc."))
+                   :on-conflict-update 'did
+                   :update-set 'dname 'excluded.dname))
+             "INSERT INTO distributors (did, dname) VALUES (5, E'Gizmo Transglobal'), (6, E'Associated Computing Inc.') ON CONFLICT (did) DO UPDATE SET dname = excluded.dname"))
+  ;; with where clause
+  (is (equal (sql (:insert-rows-into 'users
+                   :values '(((:uuid-generate-v4) "Lucie" "Hawkins" "Lucie-Jones@gmail.com"))
+                   :on-conflict-update 'email
+                   :update-set 'first-name 'excluded.first-name 'last-name 'excluded.last-name
+                   :where (:<> 'u.first-name "Lucie")))
+             "INSERT INTO users VALUES (uuid_generate_v4(), E'Lucie', E'Hawkins', E'Lucie-Jones@gmail.com') ON CONFLICT (email) DO UPDATE SET first_name = excluded.first_name, last_name = excluded.last_name WHERE (u.first_name <> E'Lucie')"))
+  ;; with an as clause at the table level
+  (is (equal (sql (:insert-rows-into (:as 'users 'u)
+                   :values '(((:uuid-generate-v4) "Lucie" "Jones" "Lucie-Jones@gmail.com"))
+                   :on-conflict-update 'email
+                   :update-set 'first-name 'excluded.first-name 'last-name 'excluded.last-name
+                   :where (:<> 'u.first-name "Lucie")))
+             "INSERT INTO users AS u VALUES (uuid_generate_v4(), E'Lucie', E'Jones', E'Lucie-Jones@gmail.com') ON CONFLICT (email) DO UPDATE SET first_name = excluded.first_name, last_name = excluded.last_name WHERE (u.first_name <> E'Lucie')"))
+  ;; with concatenation function in the update-set clause
+  (is (equal (sql (:insert-rows-into (:as 'distributors 'd)
+                   :columns 'did 'dname
+                   :values '((8 "Anvil Distribution"))
+                   :on-conflict-update 'did
+                   :update-set 'dname (:|| 'excluded.dname  " (formerly " 'd.dname ")")
+                   :where (:<> 'd.zipcode "21201")))
+             "INSERT INTO distributors AS d (did, dname) VALUES (8, E'Anvil Distribution') ON CONFLICT (did) DO UPDATE SET dname = (excluded.dname || E' (formerly ' || d.dname || E')') WHERE (d.zipcode <> E'21201')"))
+  ;; with on-conflict-on-constraint
+  (is (equal (sql (:insert-rows-into 'test
+                   :columns 'some-key 'some-val
+                   :values '(("a" 5))
+                   :on-conflict-on-constraint 'somekey
+                   :update-set 'some-val 'excluded.some-val))
+             "INSERT INTO test (some_key, some_val) VALUES (E'a', 5) ON CONFLICT ON CONSTRAINT somekey DO UPDATE SET some_val = excluded.some_val"))
+  ;; with on-conflict-on-constraint and returning clause
+  (is (equal (sql (:insert-rows-into 'test
+                   :columns 'some-key 'some-val
+                   :values '(("a" 2) ("b" 6) ("c" 7))
+                   :on-conflict-on-constraint 'somekey
+                   :update-set 'some-val 'excluded.some-val
+                   :returning '*))
+             "INSERT INTO test (some_key, some_val) VALUES (E'a', 2), (E'b', 6), (E'c', 7) ON CONFLICT ON CONSTRAINT somekey DO UPDATE SET some_val = excluded.some_val RETURNING *"))
+;; on-conflict-on-constraint with addition function in the update-set clause
+  (is (equal (sql (:insert-rows-into 'test
+                   :columns 'some-key
+                   :values '(("a"))
+                   :on-conflict-on-constraint 'somekey
+                   :update-set 'some-val (:+ 'test.some-val 1)))
+             "INSERT INTO test (some_key) VALUES (E'a') ON CONFLICT ON CONSTRAINT somekey DO UPDATE SET some_val = (test.some_val + 1)"))
+  ;; with select clause which returns a single row
+  (is (equal (sql (:insert-rows-into 'attendence :columns 'event-id 'client-id 'attend-status
+                   :values '(((:select 'id
+                               :from 'event
+                               :where (:= (:lower 'event-dt) "2020-01-11 17:00:00"))
+                              3
+                              "No Show"))
+                          :on-conflict-on-constraint 'attendance-pkey
+                   :update-set 'attend-status 'excluded.attend_status))
+             "INSERT INTO attendence (event_id, client_id, attend_status) VALUES ((SELECT id FROM event WHERE (lower(event_dt) = E'2020-01-11 17:00:00')), 3, E'No Show') ON CONFLICT ON CONSTRAINT attendance_pkey DO UPDATE SET attend_status = excluded.attend_status")))
 
 (test update
       "Testing updates"
@@ -1324,36 +1713,36 @@ FROM manufacturers m LEFT JOIN LATERAL get_product_names(m.id) pname ON true;
         (is (eq null? t))))
 
 (test create-index
-  "Testing create-index. Available parameters - in order after name - are :concurrently, :on, :using, :fields
+      "Testing create-index. Available parameters - in order after name - are :concurrently, :on, :using, :fields
 and :where.The advantage to using the keyword :concurrently is that writes to the table
 from other sessions are not locked out while the index is is built. The disadvantage is
 that the table will need to be scanned twice. Everything is a trade-off."
-  (is (equal (sql (:create-index 'films_idx :on 'films :fields 'title))
-             "CREATE INDEX films_idx ON films (title)"))
-  (is (equal (sql (:create-index 'films-idx :on "films" :fields 'title))
-             "CREATE INDEX films_idx ON films (title)"))
-  (is (equal (sql (:create-index 'films-idx :on "films" :fields 'title 'id))
-             "CREATE INDEX films_idx ON films (title, id)"))
-  (is (equal (sql (:create-index 'films_idx :on "films" :using gin :fields 'title))
-             "CREATE INDEX films_idx ON films USING gin (title)"))
-  (is (equal (sql (:create-index 'doc-tags-id-tags :on "doc-tags-array" :using gin :fields 'tags))
-             "CREATE INDEX doc_tags_id_tags ON doc_tags_array USING gin (tags)"))
-  (is (equal (sql (:create-unique-index 'doc-tags-id-doc-id :on "doc-tags-array"  :fields 'doc-id))
-             "CREATE UNIQUE INDEX doc_tags_id_doc_id ON doc_tags_array (doc_id)"))
-    (is (equal (sql (:create-index 'films-idx :concurrently :on "films" :using 'btree :fields 'created-at))
-             "CREATE INDEX CONCURRENTLY films_idx ON films USING btree (created_at)"))
-  (is (equal (sql (:create-index 'films-idx :unique :concurrently :on "films" :using 'btree :fields 'created-at))
-             "CREATE UNIQUE INDEX CONCURRENTLY films_idx ON films USING btree (created_at)"))
-  (is (equal (sql (:create-index (:if-not-exists 'test-uniq-1-idx) :on test-uniq :fields 'name))
-             "CREATE INDEX IF NOT EXISTS test_uniq_1_idx ON test_uniq (name)"))
-    (with-test-connection
-    (query (:drop-table :if-exists 'george :cascade))
-    (is (eq (table-exists-p 'george) nil))
-    (query (:create-table 'george ((id :type integer))))
-    (is (eq (table-exists-p 'george) t))
-    (query (:create-index 'george-idx :on 'george :fields 'id))
-    (is (pomo:index-exists-p 'george-idx))
-    (is (pomo:index-exists-p "george-idx"))))
+      (is (equal (sql (:create-index 'films_idx :on 'films :fields 'title))
+                 "CREATE INDEX films_idx ON films (title)"))
+      (is (equal (sql (:create-index 'films-idx :on "films" :fields 'title))
+                 "CREATE INDEX films_idx ON films (title)"))
+      (is (equal (sql (:create-index 'films-idx :on "films" :fields 'title 'id))
+                 "CREATE INDEX films_idx ON films (title, id)"))
+      (is (equal (sql (:create-index 'films_idx :on "films" :using gin :fields 'title))
+                 "CREATE INDEX films_idx ON films USING gin (title)"))
+      (is (equal (sql (:create-index 'doc-tags-id-tags :on "doc-tags-array" :using gin :fields 'tags))
+                 "CREATE INDEX doc_tags_id_tags ON doc_tags_array USING gin (tags)"))
+      (is (equal (sql (:create-unique-index 'doc-tags-id-doc-id :on "doc-tags-array"  :fields 'doc-id))
+                 "CREATE UNIQUE INDEX doc_tags_id_doc_id ON doc_tags_array (doc_id)"))
+      (is (equal (sql (:create-index 'films-idx :concurrently :on "films" :using 'btree :fields 'created-at))
+                 "CREATE INDEX CONCURRENTLY films_idx ON films USING btree (created_at)"))
+      (is (equal (sql (:create-index 'films-idx :unique :concurrently :on "films" :using 'btree :fields 'created-at))
+                 "CREATE UNIQUE INDEX CONCURRENTLY films_idx ON films USING btree (created_at)"))
+      (is (equal (sql (:create-index (:if-not-exists 'test-uniq-1-idx) :on test-uniq :fields 'name))
+                 "CREATE INDEX IF NOT EXISTS test_uniq_1_idx ON test_uniq (name)"))
+      (with-test-connection
+          (query (:drop-table :if-exists 'george :cascade))
+        (is (eq (table-exists-p 'george) nil))
+        (query (:create-table 'george ((id :type integer))))
+        (is (eq (table-exists-p 'george) t))
+        (query (:create-index 'george-idx :on 'george :fields 'id))
+        (is (pomo:index-exists-p 'george-idx))
+        (is (pomo:index-exists-p "george-idx"))))
 
 
 (test create-view
@@ -1364,14 +1753,17 @@ that the table will need to be scanned twice. Everything is a trade-off."
              "CREATE VIEW quagmire AS (SELECT id, name FROM employee)"))
   (is (equal (sql (:create-view "quagmire" (:select 'id 'name :from 'employee)))
              "CREATE VIEW quagmire AS (SELECT id, name FROM employee)"))
+  (is (equal (sql (:create-view 'quagmire-hollow (:select 'id 'name :from 'employee)))
+             "CREATE VIEW quagmire_hollow AS (SELECT id, name FROM employee)"))
+  (is (equal (sql (:create-view "quagmire-hollow" (:select 'id 'name :from 'employee)))
+             "CREATE VIEW quagmire_hollow AS (SELECT id, name FROM employee)"))
   (with-test-connection
-    (when (view-exists-p 'quagmire)
+    (unless (table-exists-p 'employee) (build-employee-table))
+    (when (view-exists-p 'quagmire) ; this avoids a warning compared to (query (:drop-view :if-exists 'quagmire))
       (query (:drop-view 'quagmire)))
     (query (:create-view 'quagmire (:select 'id 'name :from 'employee)))
-    (is (equal (list-views)
-        '(:QUAGMIRE)))
-    (is (equal (list-views t)
-        '("quagmire")))
+    (is (member :QUAGMIRE (list-views) :test 'eq))
+    (is (member "quagmire" (list-views t) :test 'equal))
     (is (view-exists-p 'quagmire))
     (is (view-exists-p :quagmire))
     (is (view-exists-p "quagmire"))
@@ -1382,22 +1774,24 @@ that the table will need to be scanned twice. Everything is a trade-off."
                "DROP VIEW quagmire"))))
 
 ;; Test create-table
+;; Right now having difficulty with abcl and utf8, so separate test for it
 (test reserved-column-names-s-sql
   (with-test-connection
-    (loop for x in '(from-test-data1 iceland-cities) do
-         (when (pomo:table-exists-p x)
-       (execute (:drop-table x :cascade))))
+    (when (pomo:table-exists-p 'from-test-data1)
+      (execute (:drop-table 'from-test-data1 :cascade)))
+    (when (pomo:table-exists-p 'iceland-cities)
+      (execute (:drop-table 'iceland-cities :cascade)))
     (query (:create-table 'iceland-cities
-                      ((id :type serial)
-                       (name :type (or (varchar 100) db-null) :unique t))))
+                          ((id :type serial)
+                           (name :type (or (varchar 100) db-null) :unique t))))
 
     (query (:create-table 'from-test-data1
-                      ((id :type serial)
-                       (flight :type (or integer db-null))
-                       (from :type (or (varchar 100) db-null) :references ((iceland-cities name)))
-                       (to-destination :type (or (varchar 100) db-null)))
-                      (:primary-key id)
-                      (:constraint iceland-city-name-fkey :foreign-key (to-destination) (iceland-cities name))))
+                          ((id :type serial)
+                           (flight :type (or integer db-null))
+                           (from :type (or (varchar 100) db-null) :references ((iceland-cities name)))
+                           (to-destination :type (or (varchar 100) db-null)))
+                          (:primary-key id)
+                          (:constraint iceland-city-name-fkey :foreign-key (to-destination) (iceland-cities name))))
     (query (:insert-into 'iceland-cities :set 'name "Reykjavík"))
     (query (:insert-rows-into 'iceland-cities :columns 'name :values '(("Seyðisfjörður") ("Stykkishólmur") ("Bolungarvík")
                                                                        ("Kópavogur"))))
@@ -1407,7 +1801,7 @@ that the table will need to be scanned twice. Everything is a trade-off."
     (is (equal (query (:select 'from 'to-destination :from 'from-test-data1 :where (:= 'flight 1)) :row)
                '("Reykjavík" "Seyðisfjörður")))
     (is (equal (query (:select 'flight :from 'from-test-data1 :where (:and (:= 'from "Reykjavík")
-                                                                          (:= 'to-destination "Seyðisfjörður"))) :single)
+                                                                           (:= 'to-destination "Seyðisfjörður"))) :single)
                1))
     ;; test insert-rows-into
     (query (:insert-rows-into 'from-test-data1 :columns 'flight 'from 'to-destination :values '((2 "Stykkishólmur" "Reykjavík"))))
@@ -1439,5 +1833,221 @@ that the table will need to be scanned twice. Everything is a trade-off."
                                                                            (:= 'from "Stykkishólmur")))
                       :single)
                2))
-    (loop for x in '(from-test-data1 iceland-cities) do
-         (execute (:drop-table x :cascade)))))
+    (execute (:drop-table 'from-test-data1 :cascade))
+    (execute (:drop-table 'iceland-cities :cascade))))
+
+(test posix-regex
+  (with-test-connection
+    (is (equalp (query (:select (:regexp_match "foobarbequebaz" "bar.*que")) :single)
+               #("barbeque")))
+    (is (equal (query (:select (:regexp_match "foobarbequebaz" "bar.~que")) :single)
+               :NULL))
+    (is (equal (query (:select (:~ "foobarbequebaz" "bar.*que") ) :single)
+               t))
+    (is (equal (query (:select (:!~ "foobarbequebaz" "bar.*que") ) :single)
+               nil))
+    (is (equal (query (:select (:~ "foobarbequebaz" "barque") ) :single)
+               nil))
+    (is (equal (query (:select (:~ "foobarbequebaz" "barbeque") ) :single)
+               t))
+    (is (equal (query (:select (:~ "foobarBequebaz" "barbeque") ) :single)
+               nil))
+    (is (equal (query (:select (:~* "foobarBequebaz" "barbeque") ) :single)
+               t))))
+
+(test text-search
+  (with-test-connection
+    (when (pomo:table-exists-p 'text-search)
+      (execute (:drop-table 'text-search :cascade)))
+    (query (:create-table 'text-search ((id :type serial)
+                                        (text :type text))))
+    (query (:insert-rows-into
+            'text-search
+            :columns 'text
+            :values '(("Each person who knows you has a different perception of who you are.")
+                      ("Nothing is as cautiously cuddly as a pet porcupine.")
+                      ("Courage and stupidity were all that he had.")
+                      ("Hit me with your pet shark!")
+                      ("He swore he just saw his sushi move."))))
+
+    (is (equalp (query (:select 'id (:regexp-matches 'text "(s[A-z]+)") :from 'text-search))
+                '((1 #("son")) (2 #("sly")) (3 #("stupidity")) (4 #("shark")) (5 #("swore")))))
+    (is (equalp (query (:select 'id (:regexp-matches 'text "(s[A-z]+)" "g") :from 'text-search))
+                '((1 #("son")) (2 #("sly")) (3 #("stupidity")) (4 #("shark")) (5 #("swore"))
+                  (5 #("st")) (5 #("saw")) (5 #("sushi")))))
+    (is (equalp (query (:select 'id (:regexp-replace 'text "(s[A-z]+)" "g") :from 'text-search))
+                '((1 "Each perg who knows you has a different perception of who you are.")
+                  (2 "Nothing is as cautioug cuddly as a pet porcupine.")
+                  (3 "Courage and g were all that he had.") (4 "Hit me with your pet g!")
+                  (5 "He g he just saw his sushi move."))))
+    (is (equalp (query (:select 'id 'text :from 'text-search :where (:~ 'text "sushi")))
+                '((5 "He swore he just saw his sushi move."))))))
+
+(test variable-parameters
+  (is (equal (let ((column 'latitude))
+               (sql (:select column :from 'countries)))
+             "(SELECT latitude FROM countries)"))
+  (is (equal (let ((column 'latitude) (table 'countries))
+               (sql (:select column :from table)))
+             "(SELECT latitude FROM countries)"))
+  (is (equal (let ((column 'latitude) (table "countries")) ; Note that the escapes mean this will not work with postgresql
+               (s-sql::sql-expand '(:select column :from table)))
+             '("(SELECT " (SQL-ESCAPE COLUMN) " FROM " (SQL-ESCAPE TABLE) ")")))
+  (is (equal (let ((select 'countries.name))
+               (sql (:select select
+                     :from 'countries 'regions
+                     :where (:and
+                             (:or (:= 'regions.name '$1)
+                                  (:= 'regions.name '$2))
+                             (:= 'regions.id 'countries.region-id)))))
+             "(SELECT countries.name FROM countries, regions WHERE (((regions.name = $1) or (regions.name = $2)) and (regions.id = countries.region_id)))"))
+  (is (equal (let ((select "countries.name"))
+               (sql (:select select
+                     :from 'countries 'regions
+                     :where (:and
+                             (:or (:= 'regions.name '$1)
+                                  (:= 'regions.name '$2))
+                             (:= 'regions.id 'countries.region-id)))))
+             "(SELECT E'countries.name' FROM countries, regions WHERE (((regions.name = $1) or (regions.name = $2)) and (regions.id = countries.region_id)))"))
+  (is (equal (let ((select "countries.name") (table1 'countries) (table2 'regions))
+               (sql (:select select
+                     :from table1 table2
+                     :where (:and
+                             (:or (:= 'regions.name '$1)
+                                  (:= 'regions.name '$2))
+                             (:= 'regions.id 'countries.region-id)))))
+             "(SELECT E'countries.name' FROM countries, regions WHERE (((regions.name = $1) or (regions.name = $2)) and (regions.id = countries.region_id)))"))
+  (is (equal (let ((select "countries.name") (table1 "countries") (table2 "regions"))
+               (sql (:select select
+                     :from table1 table2
+                     :where (:and
+                             (:or (:= 'regions.name '$1)
+                                  (:= 'regions.name '$2))
+                             (:= 'regions.id 'countries.region-id)))))
+             "(SELECT E'countries.name' FROM E'countries', E'regions' WHERE (((regions.name = $1) or (regions.name = $2)) and (regions.id = countries.region_id)))")))
+
+(test drop-table-variations
+  (let ((table-var1 "table-1")
+        (table-var2 'table-1))
+    (labels ((create-and-check ()
+               (is-false (table-exists-p "table_1"))
+               (query (:create-table (:if-not-exists "table_1") ((id :type integer))))
+               (is-true (table-exists-p "table_1"))))
+    (with-test-connection
+      (query (:drop-table :if-exists "table_1"))
+      (create-and-check)
+    (is (equal (sql (:drop-table :if-exists table-var1 :cascade))
+               "DROP TABLE IF EXISTS table_1 CASCADE"))
+    (is (equal (sql (:drop-table :if-exists "table-1" :cascade))
+               "DROP TABLE IF EXISTS table_1 CASCADE"))
+    (is (equal (sql (:drop-table :if-exists 'table-1 :cascade))
+               "DROP TABLE IF EXISTS table_1 CASCADE"))
+    (is (equal (sql (:drop-table :if-exists table-var2 :cascade))
+               "DROP TABLE IF EXISTS table_1 CASCADE"))
+    (is (equal (sql (:drop-table (:if-exists "table-1") :cascade))
+               "DROP TABLE IF EXISTS table_1 CASCADE"))
+    (is (equal (sql (:drop-table :if-exists table-var1))
+               "DROP TABLE IF EXISTS table_1"))
+    (is (equal (sql (:drop-table :if-exists "table-1"))
+               "DROP TABLE IF EXISTS table_1"))
+    (is (equal (sql (:drop-table :if-exists 'table-1))
+               "DROP TABLE IF EXISTS table_1"))
+    (is (equal (sql (:drop-table :if-exists table-var2))
+               "DROP TABLE IF EXISTS table_1"))
+    (is (equal (sql (:drop-table (:if-exists "table-1")))
+               "DROP TABLE IF EXISTS table_1"))
+    (is (equal (sql (:drop-table table-var1 :cascade))
+               "DROP TABLE table_1 CASCADE"))
+    (is (equal (sql (:drop-table "table-1" :cascade))
+               "DROP TABLE table_1 CASCADE"))
+    (is (equal (sql (:drop-table 'table-1 :cascade))
+               "DROP TABLE table_1 CASCADE"))
+    (is (equal (sql (:drop-table table-var2 :cascade))
+               "DROP TABLE table_1 CASCADE"))
+    (is (equal (sql (:drop-table  "table-1" :cascade))
+               "DROP TABLE table_1 CASCADE"))
+    (is (equal (sql (:drop-table table-var1))
+               "DROP TABLE table_1"))
+    (is (equal (sql (:drop-table "table-1"))
+               "DROP TABLE table_1"))
+    (is (equal (sql (:drop-table 'table-1))
+               "DROP TABLE table_1"))
+    (is (equal (sql (:drop-table table-var2))
+               "DROP TABLE table_1"))
+    (is (equal (sql (:drop-table 'table-1))
+               "DROP TABLE table_1"))
+    (is (equal (sql (:drop-table "table-1"))
+               "DROP TABLE table_1"))))))
+
+(test drop-table-variations-live
+  (let ((table-var1 "table-1")
+        (table-var2 'table-1))
+    (labels ((create-and-check ()
+               (is-false (table-exists-p "table_1"))
+               (query (:create-table (:if-not-exists "table_1") ((id :type integer))))
+               (is-true (table-exists-p "table_1"))))
+      (with-test-connection
+        (query (:drop-table :if-exists "table_1"))
+        (create-and-check)
+        (query (:drop-table :if-exists table-var1 :cascade))
+        (create-and-check)
+        (query (:drop-table :if-exists "table-1" :cascade))
+        (create-and-check)
+        (query (:drop-table :if-exists 'table-1 :cascade))
+        (create-and-check)
+        (query (:drop-table :if-exists table-var2 :cascade))
+        (create-and-check)
+        (query (:drop-table (:if-exists "table-1") :cascade))
+        (create-and-check)
+        (query (:drop-table :if-exists table-var1))
+        (create-and-check)
+        (query (:drop-table :if-exists "table-1"))
+        (create-and-check)
+        (query (:drop-table :if-exists 'table-1))
+        (create-and-check)
+        (query (:drop-table :if-exists table-var2))
+        (create-and-check)
+        (query (:drop-table (:if-exists "table-1")))
+        (create-and-check)
+        (query (:drop-table table-var1 :cascade))
+        (create-and-check)
+        (query (:drop-table "table-1" :cascade))
+        (create-and-check)
+        (query (:drop-table 'table-1 :cascade))
+        (create-and-check)
+        (query (:drop-table table-var2 :cascade))
+        (create-and-check)
+        (query (:drop-table  "table-1" :cascade))
+        (create-and-check)
+        (query (:drop-table table-var1))
+        (create-and-check)
+        (query (:drop-table "table-1"))
+        (create-and-check)
+        (query (:drop-table 'table-1))
+        (create-and-check)
+        (query (:drop-table table-var2))
+        (create-and-check)
+        (query (:drop-table 'table-1))
+        (create-and-check)
+        (query (:drop-table "table-1"))
+        (is-false (table-exists-p "table_1"))))))
+
+(test over
+      (is (equal (sql (:over (:sum 'salary)))
+                 "(SUM(salary) OVER ()) "))
+      (is (equal (sql (:over (:sum 'salary) 'w))
+                 "(SUM(salary) OVER w)"))
+      (is (equal (sql (:over (:count '*)
+                  (:partition-by (:date-trunc "month" 'joindate))))
+                 "(COUNT(*) OVER (PARTITION BY date_trunc(E'month', joindate)))"))
+      (is (equal (sql (:over (:rank) (:order-by (:desc 'total))))
+                 "(rank() OVER ( ORDER BY total DESC))"))
+      (is (equal (sql (:over (:percentile-cont :fraction 0.25 :order-by (:asc 'duration))
+                             (:partition-by 'day)))
+                 "(PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY duration ASC) OVER (PARTITION BY day))")))
+
+(test between
+      (is (equal (sql (:between 'latitude -10 10))
+                 "(latitude BETWEEN -10 AND 10)"))
+      (is (equal (sql (:between (:- 'population.year 'ma-population.year)  0 2))
+                 "((population.year - ma_population.year) BETWEEN 0 AND 2)")))

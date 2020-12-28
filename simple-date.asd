@@ -1,14 +1,23 @@
+;;;; -*- Mode: LISP; Syntax: Ansi-Common-Lisp; Base: 10; -*-
+
 (defsystem "simple-date"
+  :description "Simple date library that can be used with postmodern"
+  :author "Marijn Haverbeke <marijnh@gmail.com>"
+  :maintainer "Sabra Crolleton <sabra.crolleton@gmail.com>"
+  :license "zlib"
+  :version "1.31"
   :components
   ((:module "simple-date"
-            :components ((:file "simple-date"))))
+            :components ((:file "package")
+			 (:file "simple-date"))))
   :in-order-to ((test-op (test-op "simple-date/tests"))))
 
 (defsystem "simple-date/tests"
   :depends-on ("fiveam" "simple-date")
   :components
   ((:module "simple-date"
-            :components ((:file "tests"))))
+            :components ((:file "test-package")
+			 (:file "tests"))))
   :perform (test-op (o c)
              (uiop:symbol-call :fiveam '#:run! :simple-date)))
 

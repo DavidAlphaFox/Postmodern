@@ -1,3 +1,5 @@
+;;;; -*- Mode: LISP; Syntax: Ansi-Common-Lisp; Base: 10; Package: CL-USER; -*-
+
 (defpackage :cl-postgres
   (:use :common-lisp)
   (:export #:database-error
@@ -14,6 +16,8 @@
            #:database-socket-error
            #:connection-meta
            #:connection-parameters
+           #:get-postgresql-version
+           #:postgresql-version-at-least
            #:open-database
            #:reopen-database
            #:database-open-p
@@ -60,6 +64,10 @@
            #:*ssl-key-file*
            #:*retry-connect-times*
            #:*retry-connect-delay*
+           #:string-mapped-to-nothing
+           #:string-mapped-to-space
+           #:saslprep-normalize
+           #:string-printable-ascii-p
            #+(and sbcl unix) #:*unix-socket-dir*))
 
 (defpackage :cl-postgres-error
@@ -72,6 +80,7 @@
            #:data-exception
            #:db-division-by-zero
            #:undefined-column
+           #:undefined-table
            #:duplicate-column
            #:duplicate-cursor
            #:duplicate-database
@@ -107,7 +116,14 @@
            #:server-shutdown
            #:syntax-error-or-access-violation
            #:system-error
-           #:unique-violation))
+           #:unique-violation
+           #:protocol-violation
+           #:connection-exception
+           #:connection-does-not-exist
+           #:connection-failure
+           #:sqlclient-unable-to-establish-sqlconnection
+           #:sqlserver-rejected-establishment-of-sqlconnection
+           #:transaction-resolution-unknown))
 
 (defpackage :cl-postgres-oid
   (:use :common-lisp)
@@ -221,6 +237,31 @@
            #:+index-am-handler+
            #:+tsm-handler+
            #:+anyrange+))
+
+(defpackage :cl-postgres.features
+  (:use :common-lisp)
+  (:export #:sbcl-available
+           #:sbcl-ipv6-available))
+
+(defpackage :cl-postgres-trivial-utf-8
+  (:use :common-lisp)
+  (:nicknames :clp-utf8)
+  (:export #:utf-8-byte-length
+           #:string-to-utf-8-bytes
+           #:write-utf-8-bytes
+           #:utf-8-group-size
+           #:utf-8-bytes-to-string
+           #:read-utf-8-string
+           #:utf-8-decoding-error))
+
+(defpackage :cl-postgres-ieee-floats
+  (:use :common-lisp)
+  (:nicknames :clp-ieee-floats)
+  (:export :make-float-converters
+	   :encode-float32
+	   :decode-float32
+	   :encode-float64
+	   :decode-float64))
 
 (in-package :cl-postgres)
 
